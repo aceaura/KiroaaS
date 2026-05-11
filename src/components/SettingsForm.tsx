@@ -631,75 +631,6 @@ export const SettingsForm = forwardRef<SettingsFormHandle, SettingsFormProps>(fu
                             {t('clientsIncludeKey')}
                         </p>
                     </div>
-
-                    <div className="pt-2 border-t border-stone-200/80">
-                        <div className="flex items-center justify-between gap-4">
-                            <div>
-                                <Label className="text-sm font-semibold text-[#111]">{t('repairService')}</Label>
-                                <p className="text-xs text-stone-500 mt-0.5">{t('serviceRepairDesc')}</p>
-                            </div>
-                            <Button
-                                type="button"
-                                variant="outline"
-                                onClick={handleRepairService}
-                                disabled={isRepairing || isSaving}
-                                className="h-11 px-5 rounded-xl border-stone-200 hover:bg-white hover:border-black hover:text-black transition-all"
-                            >
-                                {isRepairing ? (
-                                    <>
-                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                        {t('serviceRepairRunningShort')}
-                                    </>
-                                ) : (
-                                    <>
-                                        <Wrench className="mr-2 h-4 w-4" />
-                                        {t('repairService')}
-                                    </>
-                                )}
-                            </Button>
-                        </div>
-                        {repairMessage && (
-                            <p className="text-xs text-lime-700 mt-3">{repairMessage}</p>
-                        )}
-                        {repairError && (
-                            <p className="text-xs text-red-600 mt-2">{repairError}</p>
-                        )}
-                        {pendingOccupier && (
-                            <div className="mt-3 p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-3">
-                                <p className="text-xs text-amber-800">
-                                    {fmt(t('serviceRepairPortConflictPrompt'), {
-                                        name: pendingOccupier.processName,
-                                        pid: pendingOccupier.pid,
-                                        port: pendingOccupier.port,
-                                    })}
-                                </p>
-                                {pendingOccupier.command && (
-                                    <p className="text-[11px] text-amber-700 break-all font-mono">
-                                        {pendingOccupier.command}
-                                    </p>
-                                )}
-                                <div className="flex gap-2">
-                                    <Button
-                                        type="button"
-                                        onClick={handleConfirmCloseOccupier}
-                                        disabled={isRepairing}
-                                        className="h-9 px-4 rounded-lg bg-amber-500 hover:bg-amber-600 text-black text-xs font-semibold"
-                                    >
-                                        {t('serviceRepairCloseOccupierAndContinue')}
-                                    </Button>
-                                    <Button
-                                        type="button"
-                                        variant="outline"
-                                        onClick={handleCancelCloseOccupier}
-                                        disabled={isRepairing}
-                                        className="h-9 px-4 rounded-lg text-xs"
-                                    >
-                                        {t('serviceRepairKeepOccupier')}
-                                    </Button>
-                                </div>
-                            </div>
-                        )}
-                    </div>
                 </div>
             </div>
 
@@ -746,6 +677,88 @@ export const SettingsForm = forwardRef<SettingsFormHandle, SettingsFormProps>(fu
                             placeholder="8000"
                         />
                     </div>
+                </div>
+
+                <div className="bg-[#F8F8F8] p-6 rounded-[24px] space-y-4">
+                    <div className="flex items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                            <Wrench className="h-5 w-5 text-stone-400" />
+                            <div>
+                                <Label className="text-sm font-semibold text-[#111]">{t('repairService')}</Label>
+                                <p className="text-xs text-stone-500 mt-0.5">{t('serviceRepairDesc')}</p>
+                            </div>
+                        </div>
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={handleRepairService}
+                            disabled={isRepairing || isSaving}
+                            className="h-11 px-5 rounded-xl border-stone-200 bg-white hover:bg-stone-50 hover:border-black hover:text-black transition-all shrink-0"
+                        >
+                            {isRepairing ? (
+                                <>
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    {t('serviceRepairRunningShort')}
+                                </>
+                            ) : (
+                                <>
+                                    <Wrench className="mr-2 h-4 w-4" />
+                                    {t('repairService')}
+                                </>
+                            )}
+                        </Button>
+                    </div>
+                    <div className="flex items-center justify-between gap-4 pt-4 border-t border-stone-200/80">
+                        <div>
+                            <Label className="text-sm font-semibold text-[#111]">{t('autoRepair')}</Label>
+                            <p className="text-xs text-stone-500 mt-0.5">{t('autoRepairDesc')}</p>
+                        </div>
+                        <Switch
+                            checked={formData.auto_repair}
+                            onCheckedChange={(checked) => updateField('auto_repair', checked)}
+                        />
+                    </div>
+                    {repairMessage && (
+                        <p className="text-xs text-lime-700">{repairMessage}</p>
+                    )}
+                    {repairError && (
+                        <p className="text-xs text-red-600">{repairError}</p>
+                    )}
+                    {pendingOccupier && (
+                        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-3">
+                            <p className="text-xs text-amber-800">
+                                {fmt(t('serviceRepairPortConflictPrompt'), {
+                                    name: pendingOccupier.processName,
+                                    pid: pendingOccupier.pid,
+                                    port: pendingOccupier.port,
+                                })}
+                            </p>
+                            {pendingOccupier.command && (
+                                <p className="text-[11px] text-amber-700 break-all font-mono">
+                                    {pendingOccupier.command}
+                                </p>
+                            )}
+                            <div className="flex gap-2">
+                                <Button
+                                    type="button"
+                                    onClick={handleConfirmCloseOccupier}
+                                    disabled={isRepairing}
+                                    className="h-9 px-4 rounded-lg bg-amber-500 hover:bg-amber-600 text-black text-xs font-semibold"
+                                >
+                                    {t('serviceRepairCloseOccupierAndContinue')}
+                                </Button>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    onClick={handleCancelCloseOccupier}
+                                    disabled={isRepairing}
+                                    className="h-9 px-4 rounded-lg text-xs"
+                                >
+                                    {t('serviceRepairKeepOccupier')}
+                                </Button>
+                            </div>
+                        </div>
+                    )}
                 </div>
             </div>
 

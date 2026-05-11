@@ -40,6 +40,8 @@ Priority: CLI args > Environment variables > Default values
 """
 
 import argparse
+import asyncio
+import json
 import logging
 import sys
 import os
@@ -73,11 +75,15 @@ from kiro.config import (
     HIDDEN_FROM_LIST,
     FALLBACK_MODELS,
     VPN_PROXY_URL,
+    ACCOUNT_SYSTEM,
+    ACCOUNTS_CONFIG_FILE,
+    ACCOUNTS_STATE_FILE,
     _warn_timeout_configuration,
 )
 from kiro.auth import KiroAuthManager
 from kiro.cache import ModelInfoCache
 from kiro.model_resolver import ModelResolver
+from kiro.account_manager import AccountManager
 from kiro.routes_openai import router as openai_router
 from kiro.routes_anthropic import router as anthropic_router
 from kiro.exceptions import validation_exception_handler
@@ -204,13 +210,27 @@ def validate_configuration() -> None:
     """
     Validates that required configuration is present.
     
+    Priority:
+    1. credentials.json (Account System) - if exists, skip legacy validation
+    2. Legacy .env variables (REFRESH_TOKEN, KIRO_CREDS_FILE, KIRO_CLI_DB_FILE)
+    
     Checks:
-    - Either REFRESH_TOKEN, KIRO_CREDS_FILE, or KIRO_CLI_DB_FILE is configured
+    - Either credentials.json exists OR legacy variables are configured
     - Supports both .env file (local) and environment variables (Docker)
     
     Raises:
         SystemExit: If critical configuration is missing
     """
+    # Priority 1: Check if credentials.json exists (Account System)
+    # If it exists, legacy .env validation is skipped
+    from kiro.config import ACCOUNTS_CONFIG_FILE
+    creds_json_path = Path(ACCOUNTS_CONFIG_FILE)
+    
+    if creds_json_path.exists():
+        logger.debug(f"Found {ACCOUNTS_CONFIG_FILE}, skipping legacy .env validation")
+        return
+    
+    # Priority 2: credentials.json doesn't exist - validate legacy .env variables
     errors = []
     
     # Check if .env file exists (optional - can use environment variables)
@@ -291,7 +311,7 @@ def validate_configuration() -> None:
                 logger.error(f"  {line}")
         logger.error("=" * 60)
         logger.error("")
-        sys.exit(1)
+        raise RuntimeError("Configuration validation failed")
     
     # Note: Credential loading details are logged by KiroAuthManager
 
@@ -335,91 +355,177 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Shared HTTP client created with connection pooling")
     
-    # Create AuthManager
-    # Priority: SQLite DB > JSON file > environment variables
-    app.state.auth_manager = KiroAuthManager(
-        refresh_token=REFRESH_TOKEN,
-        profile_arn=PROFILE_ARN,
-        region=REGION,
-        creds_file=KIRO_CREDS_FILE if KIRO_CREDS_FILE else None,
-        sqlite_db=KIRO_CLI_DB_FILE if KIRO_CLI_DB_FILE else None,
-    )
+    # ==============================================================================
+    # Legacy Fallback: .env → credentials.json
+    # ==============================================================================
+    creds_path = Path(ACCOUNTS_CONFIG_FILE)
     
-    # Create model cache
-    app.state.model_cache = ModelInfoCache()
+    # Check if we have legacy .env credentials
+    has_refresh_token = bool(REFRESH_TOKEN)
+    has_creds_file = bool(KIRO_CREDS_FILE) and Path(KIRO_CREDS_FILE).expanduser().exists()
+    has_cli_db = bool(KIRO_CLI_DB_FILE) and Path(KIRO_CLI_DB_FILE).expanduser().exists()
     
-    # BLOCKING: Load models from Kiro API at startup
-    # This ensures the cache is populated BEFORE accepting any requests.
-    # No race conditions - requests only start after yield.
-    logger.info("Loading models from Kiro API...")
-    try:
-        token = await app.state.auth_manager.get_access_token()
-        from kiro.utils import get_kiro_headers
-        from kiro.auth import AuthType
-        headers = get_kiro_headers(app.state.auth_manager, token)
+    # Helper function to add optional per-account overrides from .env
+    def _add_env_overrides(entry: dict) -> None:
+        """Add optional per-account overrides from .env (only if set)"""
+        profile_arn = os.getenv("PROFILE_ARN")
+        if profile_arn:
+            entry["profile_arn"] = profile_arn
         
-        # Build params - profileArn is only needed for Kiro Desktop auth
-        params = {"origin": "AI_EDITOR"}
-        if app.state.auth_manager.auth_type == AuthType.KIRO_DESKTOP and app.state.auth_manager.profile_arn:
-            params["profileArn"] = app.state.auth_manager.profile_arn
+        region = os.getenv("KIRO_REGION")
+        if region:
+            entry["region"] = region
         
-        list_models_url = f"{app.state.auth_manager.q_host}/ListAvailableModels"
-        logger.debug(f"Fetching models from: {list_models_url}")
-        
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(
-                list_models_url,
-                headers=headers,
-                params=params
-            )
+        api_region = os.getenv("KIRO_API_REGION")
+        if api_region:
+            entry["api_region"] = api_region
+    
+    if ACCOUNT_SYSTEM:
+        # Account system enabled: create credentials.json ONCE (migration)
+        if not creds_path.exists():
+            if has_refresh_token or has_creds_file or has_cli_db:
+                logger.info("credentials.json not found, creating from .env (one-time migration)")
+                credentials = []
+                
+                # Priority: SQLite DB > JSON file > environment variables (same as KiroAuthManager)
+                if has_cli_db:
+                    entry = {
+                        "type": "sqlite",
+                        "path": KIRO_CLI_DB_FILE
+                    }
+                    _add_env_overrides(entry)
+                    credentials.append(entry)
+                elif has_creds_file:
+                    entry = {
+                        "type": "json",
+                        "path": KIRO_CREDS_FILE
+                    }
+                    _add_env_overrides(entry)
+                    credentials.append(entry)
+                elif has_refresh_token:
+                    entry = {
+                        "type": "refresh_token",
+                        "refresh_token": REFRESH_TOKEN
+                    }
+                    _add_env_overrides(entry)
+                    credentials.append(entry)
             
-            if response.status_code == 200:
-                data = response.json()
-                models_list = data.get("models", [])
-                await app.state.model_cache.update(models_list)
-                logger.debug(f"Successfully loaded {len(models_list)} models from Kiro API")
-            else:
-                raise Exception(f"HTTP {response.status_code}")
-    except Exception as e:
-        # FALLBACK: Use built-in model list
-        logger.error(f"Failed to fetch models from Kiro API: {e}")
-        logger.error("Using pre-configured fallback models. Not all models may be available on your plan, or the list may be outdated.")
-        
-        # Populate cache with fallback models
-        await app.state.model_cache.update(FALLBACK_MODELS)
-        logger.debug(f"Loaded {len(FALLBACK_MODELS)} fallback models")
+                # Save credentials.json
+                with open(creds_path, 'w', encoding='utf-8') as f:
+                    json.dump(credentials, f, indent=2, ensure_ascii=False)
+                
+                logger.info("Created credentials.json from .env (one-time migration)")
+    else:
+        # Legacy mode: ALWAYS recreate credentials.json from .env
+        if has_refresh_token or has_creds_file or has_cli_db:
+            logger.debug("Legacy mode: recreating credentials.json from .env")
+            credentials = []
+            
+            # Priority: SQLite DB > JSON file > environment variables (same as KiroAuthManager)
+            if has_cli_db:
+                entry = {
+                    "type": "sqlite",
+                    "path": KIRO_CLI_DB_FILE
+                }
+                _add_env_overrides(entry)
+                credentials.append(entry)
+            elif has_creds_file:
+                entry = {
+                    "type": "json",
+                    "path": KIRO_CREDS_FILE
+                }
+                _add_env_overrides(entry)
+                credentials.append(entry)
+            elif has_refresh_token:
+                entry = {
+                    "type": "refresh_token",
+                    "refresh_token": REFRESH_TOKEN
+                }
+                _add_env_overrides(entry)
+                credentials.append(entry)
+            
+            # Save credentials.json (overwrite if exists)
+            with open(creds_path, 'w', encoding='utf-8') as f:
+                json.dump(credentials, f, indent=2, ensure_ascii=False)
+            
+            logger.debug("credentials.json recreated from .env (legacy mode)")
     
-    # Add hidden models to cache (they appear in /v1/models but not in Kiro API)
-    # Hidden models are added ALWAYS, regardless of API success/failure
-    for display_name, internal_id in HIDDEN_MODELS.items():
-        app.state.model_cache.add_hidden_model(display_name, internal_id)
-    
-    if HIDDEN_MODELS:
-        logger.debug(f"Added {len(HIDDEN_MODELS)} hidden models to cache")
-    
-    # Log final cache state
-    all_models = app.state.model_cache.get_all_model_ids()
-    logger.info(f"Model cache ready: {len(all_models)} models total")
-    
-    # Create model resolver (uses cache + hidden models + aliases for resolution)
-    app.state.model_resolver = ModelResolver(
-        cache=app.state.model_cache,
-        hidden_models=HIDDEN_MODELS,
-        aliases=MODEL_ALIASES,
-        hidden_from_list=HIDDEN_FROM_LIST
+    # ==============================================================================
+    # Create AccountManager
+    # ==============================================================================
+    app.state.account_manager = AccountManager(
+        credentials_file=ACCOUNTS_CONFIG_FILE,
+        state_file=ACCOUNTS_STATE_FILE
     )
-    logger.info("Model resolver initialized")
     
-    # Log alias configuration if any
-    if MODEL_ALIASES:
-        logger.debug(f"Model aliases configured: {list(MODEL_ALIASES.keys())}")
-    if HIDDEN_FROM_LIST:
-        logger.debug(f"Models hidden from list: {HIDDEN_FROM_LIST}")
+    # Load credentials and state
+    await app.state.account_manager.load_credentials()
+    await app.state.account_manager.load_state()
+    
+    # Store account_system flag
+    app.state.account_system = ACCOUNT_SYSTEM
+    
+    # ==============================================================================
+    # Initialize first working account (blocking)
+    # ==============================================================================
+    all_accounts = list(app.state.account_manager._accounts.keys())
+    
+    if not all_accounts:
+        logger.error("No accounts configured in credentials.json")
+        raise RuntimeError("No accounts configured in credentials.json")
+    
+    # Determine start index from state.json
+    start_index = app.state.account_manager._current_account_index
+    
+    # Try to initialize accounts (full circle)
+    initialized = False
+    
+    for i in range(len(all_accounts)):
+        current_index = (start_index + i) % len(all_accounts)
+        account_id = all_accounts[current_index]
+        
+        logger.info(f"Attempting to initialize account: {account_id}")
+        
+        success = await app.state.account_manager._initialize_account(account_id)
+        
+        if success:
+            logger.info(f"Successfully initialized account: {account_id}")
+            initialized = True
+            break
+        else:
+            logger.warning(f"Failed to initialize account: {account_id}")
+    
+    if not initialized:
+        logger.error("Failed to initialize any account. Check your credentials.")
+        raise RuntimeError("Failed to initialize any account")
+    
+    # Save initial state
+    await app.state.account_manager._save_state()
+    
+    # Start background task for periodic state saving
+    save_task = asyncio.create_task(
+        app.state.account_manager.save_state_periodically()
+    )
+    
+    logger.info("Account system initialized successfully")
     
     yield
     
     # Graceful shutdown
     logger.info("Shutting down application...")
+    
+    # Cancel background task
+    save_task.cancel()
+    try:
+        await save_task
+    except asyncio.CancelledError:
+        pass
+    
+    # Final state save
+    await app.state.account_manager._save_state()
+    logger.info("Final state saved")
+    
+    # Close HTTP client
     try:
         await app.state.http_client.aclose()
         logger.info("Shared HTTP client closed")
@@ -469,13 +575,12 @@ app.include_router(anthropic_router)
 # --- Uvicorn log config ---
 # Minimal configuration for redirecting uvicorn logs to loguru.
 # Uses InterceptHandler which intercepts logs and passes them to loguru.
-# Use __main__ for PyInstaller compatibility
 UVICORN_LOG_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
     "handlers": {
         "default": {
-            "class": "__main__.InterceptHandler",
+            "class": "main.InterceptHandler",
         },
     },
     "loggers": {
@@ -537,45 +642,27 @@ Examples:
         action="version",
         version=f"%(prog)s {APP_VERSION}"
     )
-
-    parser.add_argument(
-        "--config-file",
-        type=str,
-        default=None,
-        metavar="CONFIG_FILE",
-        help="Path to config file from Tauri (for desktop app integration)"
-    )
-
+    
     return parser.parse_args()
 
 
 def resolve_server_config(args: argparse.Namespace) -> tuple[str, int]:
     """
     Resolve final server configuration using priority hierarchy.
-
+    
     Priority (highest to lowest):
     1. CLI arguments (--host, --port)
     2. Environment variables (SERVER_HOST, SERVER_PORT)
     3. Default values (0.0.0.0:8000)
-
-    Special handling for Tauri:
-    - When TAURI_MANAGED=true, bind to 127.0.0.1 for security
-
+    
     Args:
         args: Parsed CLI arguments
-
+        
     Returns:
         Tuple of (host, port) with resolved values
     """
-    # Check if running under Tauri management
-    is_tauri_managed = os.getenv("TAURI_MANAGED") == "true"
-
     # Host resolution: CLI > ENV > Default
-    # Override to localhost if Tauri-managed (security)
-    if is_tauri_managed and args.host is None:
-        final_host = "127.0.0.1"
-        host_source = "Tauri (localhost only)"
-    elif args.host is not None:
+    if args.host is not None:
         final_host = args.host
         host_source = "CLI argument"
     elif SERVER_HOST != DEFAULT_SERVER_HOST:
@@ -606,20 +693,11 @@ def resolve_server_config(args: argparse.Namespace) -> tuple[str, int]:
 def print_startup_banner(host: str, port: int) -> None:
     """
     Print a startup banner with server information.
-
+    
     Args:
         host: Server host address
         port: Server port
     """
-    # Check if running under Tauri management
-    is_tauri_managed = os.getenv("TAURI_MANAGED") == "true"
-
-    # If Tauri-managed, print ready signal for detection
-    if is_tauri_managed:
-        print(f"KIRO_GATEWAY_READY:{port}", flush=True)
-        logger.info(f"Server ready on port {port} (Tauri-managed)")
-        return
-
     # ANSI color codes
     GREEN = "\033[92m"
     CYAN = "\033[96m"
@@ -628,11 +706,11 @@ def print_startup_banner(host: str, port: int) -> None:
     BOLD = "\033[1m"
     DIM = "\033[2m"
     RESET = "\033[0m"
-
+    
     # Determine display URL
     display_host = "localhost" if host == "0.0.0.0" else host
     url = f"http://{display_host}:{port}"
-
+    
     print()
     print(f"  {WHITE}{BOLD}👻 {APP_TITLE} v{APP_VERSION}{RESET}")
     print()
@@ -653,14 +731,14 @@ def print_startup_banner(host: str, port: int) -> None:
 if __name__ == "__main__":
     import uvicorn
     
+    # Parse CLI arguments first (handles --version, --help without requiring config)
+    args = parse_cli_args()
+    
     # Run configuration validation before starting server
     validate_configuration()
     
     # Warn about suboptimal timeout configuration
     _warn_timeout_configuration()
-    
-    # Parse CLI arguments
-    args = parse_cli_args()
     
     # Resolve final configuration with priority hierarchy
     final_host, final_port = resolve_server_config(args)
@@ -669,10 +747,10 @@ if __name__ == "__main__":
     print_startup_banner(final_host, final_port)
     
     logger.info(f"Starting Uvicorn server on {final_host}:{final_port}...")
-
-    # Pass app object directly for PyInstaller compatibility
+    
+    # Use string reference to avoid double module import
     uvicorn.run(
-        app,
+        "main:app",
         host=final_host,
         port=final_port,
         log_config=UVICORN_LOG_CONFIG,

@@ -237,6 +237,8 @@ export const translations = {
     autoLaunchDesc: '开启后应用将在系统启动时自动运行',
     autoStartServer: '自动启动服务器',
     autoStartServerDesc: '开启后应用打开时会自动启动服务器',
+    autoRepair: '自动修复',
+    autoRepairDesc: '启动/重启服务时自动检测异常并尝试修复',
     serverPort: '服务器端口',
     serverPortDesc: '服务器监听的端口号，修改后需重启生效',
 
@@ -278,6 +280,13 @@ export const translations = {
     usageOverage: '超额用量',
     usageOverageOn: '已开启',
     usageOverageOff: '已关闭',
+
+    // Models Card
+    supportedModels: '支持的模型',
+    modelsServerOffline: '启动服务器后查看模型列表',
+    modelsLoadFailed: '加载模型列表失败',
+    modelsEmpty: '暂无可用模型',
+    modelsClickToView: '点击查看',
 
     // Account
     tabAccount: '账户',
@@ -561,6 +570,8 @@ export const translations = {
     autoLaunchDesc: 'Automatically start the app when your system boots',
     autoStartServer: 'Auto-Start Server',
     autoStartServerDesc: 'Automatically start the server when the app opens',
+    autoRepair: 'Auto Repair',
+    autoRepairDesc: 'Automatically detect and recover the service on start/restart',
     serverPort: 'Server Port',
     serverPortDesc: 'The port the server listens on. Restart required after change.',
 
@@ -602,6 +613,13 @@ export const translations = {
     usageOverage: 'Overage',
     usageOverageOn: 'Enabled',
     usageOverageOff: 'Disabled',
+
+    // Models Card
+    supportedModels: 'Supported Models',
+    modelsServerOffline: 'Start the server to view models',
+    modelsLoadFailed: 'Failed to load models',
+    modelsEmpty: 'No models available',
+    modelsClickToView: 'Click to view',
   },
   ru: {
     // App
@@ -839,6 +857,8 @@ export const translations = {
     autoLaunchDesc: 'При включении приложение будет автоматически запускаться при старте системы',
     autoStartServer: 'Автозапуск сервера',
     autoStartServerDesc: 'Автоматически запускать сервер при открытии приложения',
+    autoRepair: 'Автовосстановление',
+    autoRepairDesc: 'Автоматически обнаруживать и исправлять проблемы при запуске/перезапуске',
     serverPort: 'Порт сервера',
     serverPortDesc: 'Порт, на котором слушает сервер. После изменения требуется перезапуск.',
 
@@ -880,6 +900,13 @@ export const translations = {
     usageOverage: 'Превышение',
     usageOverageOn: 'Включено',
     usageOverageOff: 'Отключено',
+
+    // Models Card
+    supportedModels: 'Поддерживаемые модели',
+    modelsServerOffline: 'Запустите сервер для просмотра моделей',
+    modelsLoadFailed: 'Не удалось загрузить модели',
+    modelsEmpty: 'Нет доступных моделей',
+    modelsClickToView: 'Нажмите, чтобы посмотреть',
 
     // Account
     tabAccount: 'Аккаунт',
@@ -1142,6 +1169,8 @@ export const translations = {
     autoLaunchDesc: 'Inicia la aplicación automáticamente cuando el sistema arranca',
     autoStartServer: 'Iniciar servidor automáticamente',
     autoStartServerDesc: 'Inicia el servidor automáticamente al abrir la aplicación',
+    autoRepair: 'Reparación automática',
+    autoRepairDesc: 'Detecta y repara el servicio automáticamente al iniciar/reiniciar',
     serverPort: 'Puerto del servidor',
     serverPortDesc: 'El puerto en el que escucha el servidor. Se requiere reinicio después del cambio.',
 
@@ -1183,6 +1212,13 @@ export const translations = {
     usageOverage: 'Excedente',
     usageOverageOn: 'Activado',
     usageOverageOff: 'Desactivado',
+
+    // Models Card
+    supportedModels: 'Modelos compatibles',
+    modelsServerOffline: 'Inicia el servidor para ver los modelos',
+    modelsLoadFailed: 'Error al cargar los modelos',
+    modelsEmpty: 'No hay modelos disponibles',
+    modelsClickToView: 'Haz clic para ver',
 
     // Account
     tabAccount: 'Cuenta',
@@ -1445,6 +1481,8 @@ export const translations = {
     autoLaunchDesc: 'Secara otomatis memulai aplikasi saat sistem dinyalakan',
     autoStartServer: 'Mulai server otomatis',
     autoStartServerDesc: 'Secara otomatis memulai server saat aplikasi dibuka',
+    autoRepair: 'Perbaikan Otomatis',
+    autoRepairDesc: 'Deteksi dan perbaiki layanan secara otomatis saat start/restart',
     serverPort: 'Port server',
     serverPortDesc: 'Port yang didengarkan server. Perlu restart setelah perubahan.',
 
@@ -1486,6 +1524,13 @@ export const translations = {
     usageOverage: 'Kelebihan',
     usageOverageOn: 'Aktif',
     usageOverageOff: 'Nonaktif',
+
+    // Models Card
+    supportedModels: 'Model yang Didukung',
+    modelsServerOffline: 'Mulai server untuk melihat model',
+    modelsLoadFailed: 'Gagal memuat model',
+    modelsEmpty: 'Tidak ada model tersedia',
+    modelsClickToView: 'Klik untuk melihat',
 
     // Account
     tabAccount: 'Akun',
@@ -1748,6 +1793,8 @@ export const translations = {
     autoLaunchDesc: 'Inicia o aplicativo automaticamente quando o sistema é ligado',
     autoStartServer: 'Iniciar servidor automaticamente',
     autoStartServerDesc: 'Inicia o servidor automaticamente quando o aplicativo é aberto',
+    autoRepair: 'Reparo automático',
+    autoRepairDesc: 'Detecta e recupera o serviço automaticamente ao iniciar/reiniciar',
     serverPort: 'Porta do servidor',
     serverPortDesc: 'A porta em que o servidor escuta. Reinício necessário após alteração.',
 
@@ -1789,6 +1836,13 @@ export const translations = {
     usageOverage: 'Excedente',
     usageOverageOn: 'Ativado',
     usageOverageOff: 'Desativado',
+
+    // Models Card
+    supportedModels: 'Modelos Suportados',
+    modelsServerOffline: 'Inicie o servidor para ver os modelos',
+    modelsLoadFailed: 'Falha ao carregar modelos',
+    modelsEmpty: 'Nenhum modelo disponível',
+    modelsClickToView: 'Clique para ver',
 
     // Account
     tabAccount: 'Conta',
@@ -2051,6 +2105,8 @@ export const translations = {
     autoLaunchDesc: 'システム起動時にアプリを自動的に起動します',
     autoStartServer: 'サーバーを自動起動',
     autoStartServerDesc: 'アプリを開いたときにサーバーを自動的に起動します',
+    autoRepair: '自動修復',
+    autoRepairDesc: '起動/再起動時にサービスの異常を自動検出して修復します',
     serverPort: 'サーバーポート',
     serverPortDesc: 'サーバーが待ち受けるポート番号。変更後は再起動が必要です。',
 
@@ -2092,6 +2148,13 @@ export const translations = {
     usageOverage: '超過',
     usageOverageOn: '有効',
     usageOverageOff: '無効',
+
+    // Models Card
+    supportedModels: '対応モデル',
+    modelsServerOffline: 'サーバーを起動してモデルを表示',
+    modelsLoadFailed: 'モデルの読み込みに失敗',
+    modelsEmpty: '利用可能なモデルがありません',
+    modelsClickToView: 'クリックして表示',
 
     // Account
     tabAccount: 'アカウント',
@@ -2354,6 +2417,8 @@ export const translations = {
     autoLaunchDesc: '시스템 부팅 시 앱을 자동으로 시작합니다',
     autoStartServer: '서버 자동 시작',
     autoStartServerDesc: '앱이 열릴 때 서버를 자동으로 시작합니다',
+    autoRepair: '자동 복구',
+    autoRepairDesc: '서버 시작/재시작 시 자동으로 상태를 검사하고 복구합니다',
     serverPort: '서버 포트',
     serverPortDesc: '서버가 수신하는 포트 번호입니다. 변경 후 재시작이 필요합니다.',
 
@@ -2395,6 +2460,13 @@ export const translations = {
     usageOverage: '초과',
     usageOverageOn: '활성화',
     usageOverageOff: '비활성화',
+
+    // Models Card
+    supportedModels: '지원 모델',
+    modelsServerOffline: '서버를 시작하여 모델 확인',
+    modelsLoadFailed: '모델 로드 실패',
+    modelsEmpty: '사용 가능한 모델이 없습니다',
+    modelsClickToView: '클릭하여 보기',
 
     // Account
     tabAccount: '계정',

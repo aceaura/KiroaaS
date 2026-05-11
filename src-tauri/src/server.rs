@@ -73,10 +73,14 @@ impl ServerManager {
         // Build environment variables from config
         let mut cmd = Command::new(&python_exe);
 
-        // In development mode, run main.py directly
+        // In development mode, run app_entry.py directly from python-backend.
+        // We also cd into python-backend so the backend's state files (credentials.json,
+        // state.json) are written there instead of src-tauri/, which would otherwise
+        // trigger Tauri's file watcher and cause a rebuild loop.
         #[cfg(debug_assertions)]
         {
-            cmd.arg("../python-backend/main.py");
+            cmd.current_dir("../python-backend");
+            cmd.arg("app_entry.py");
         }
 
         cmd.env("TAURI_MANAGED", "true")

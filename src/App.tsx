@@ -6,13 +6,13 @@ import { LanguageSwitcher } from './components/LanguageSwitcher';
 import { ApiExamples } from './components/ApiExamples';
 import { CCSwitchImport } from './components/CCSwitchImport';
 import { UsageCard } from './components/UsageCard';
+import { ModelsCard } from './components/ModelsCard';
 import { ChatView } from './components/ChatView';
-import { AccountView } from './components/AccountView';
 import { useConfig } from './hooks/useConfig';
 import { useI18n } from './hooks/useI18n';
 import { useServerStatus } from './hooks/useServerStatus';
 import { useConversations } from './hooks/useConversations';
-import { startServer, stopServer, getServerLogs, getAppVersion, getDeviceModel, updateTrayServerState } from './lib/tauri';
+import { startServer, stopServer, getServerLogs, getAppVersion, getDeviceModel, updateTrayServerState, getPortOccupier, terminateProcess } from './lib/tauri';
 import { checkVersionUpdate } from './lib/versionCheck';
 import { platform, arch, version } from '@tauri-apps/api/os';
 
@@ -28,17 +28,15 @@ import {
   Square,
   Activity,
   Fingerprint,
-  ShieldCheck,
   MessageCircle,
   RotateCw,
   Save,
   AlertTriangle,
   CheckCircle,
   X,
-  User,
 } from 'lucide-react';
 
-type View = 'dashboard' | 'settings' | 'logs' | 'chat' | 'account';
+type View = 'dashboard' | 'settings' | 'logs' | 'chat';
 
 export default function App() {
   const { config, saveConfig, isLoading: isConfigLoading, error: configError } = useConfig();
@@ -201,13 +199,194 @@ export default function App() {
     };
   }, []);
 
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const generateApiKeyValue = () => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const key = Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    return `sk-${key}`;
+  };
+
+  const probeModelsStatus = async (host: string, port: number, apiKey: string): Promise<number> => {
+    try {
+      const response = await fetch(`http://${host}:${port}/v1/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        cache: 'no-store',
+      });
+      return response.status;
+    } catch {
+      return 0;
+    }
+  };
+
+  const waitForHealth = async (host: string, port: number, timeoutMs = 20000) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const response = await fetch(`http://${host}:${port}/health`, { cache: 'no-store' });
+        if (response.ok) return true;
+      } catch {
+        // keep polling
+      }
+      await sleep(500);
+    }
+    return false;
+  };
+
+  // Silent auto-repair: probe /v1/models after server start.
+  // - 200: healthy, do nothing.
+  // - 401: key mismatch, rotate proxy_api_key and restart once.
+  // - 0 / 5xx: service unresponsive. Check for port occupier first; if found,
+  //   kill it and restart. Otherwise just stop+start once and re-probe.
+  // - 403: credential problem, cannot auto-fix, log and give up.
+  const runAutoRepair = async (cfg: typeof config) => {
+    if (!cfg.auto_repair) return;
+    const host = cfg.server_host === '0.0.0.0' ? '127.0.0.1' : cfg.server_host;
+    const port = cfg.server_port;
+
+    const probeWithRetry = async (apiKey: string, attempts = 3): Promise<number> => {
+      let last = 0;
+      for (let i = 0; i < attempts; i++) {
+        last = await probeModelsStatus(host, port, apiKey);
+        if (last !== 0) return last;
+        await sleep(500);
+      }
+      return last;
+    };
+
+    const killOccupierIfAny = async (): Promise<boolean> => {
+      try {
+        const occupier = await getPortOccupier(port);
+        if (!occupier) return false;
+        console.info(`[auto-repair] port ${port} occupied by ${occupier.process_name} (PID ${occupier.pid}), terminating`);
+        await terminateProcess(occupier.pid);
+        await sleep(600);
+        return true;
+      } catch (e) {
+        console.warn('[auto-repair] failed to check/kill occupier:', e);
+        return false;
+      }
+    };
+
+    const restartWith = async (nextCfg: typeof config) => {
+      try {
+        await stopServer();
+      } catch {
+        // ignore
+      }
+      await sleep(400);
+      await killOccupierIfAny();
+      await startServer(nextCfg);
+      await waitForHealth(host, port);
+    };
+
+    try {
+      let status = await probeWithRetry(cfg.proxy_api_key);
+      console.info(`[auto-repair] initial probe: ${status}`);
+      if (status === 200) return;
+      if (status === 403) {
+        console.warn('[auto-repair] credential issue (403), cannot auto-fix.');
+        return;
+      }
+
+      let activeCfg = cfg;
+
+      // 401: rotate key and restart (also cleans up any stale occupier).
+      if (status === 401) {
+        const rotatedKey = generateApiKeyValue();
+        activeCfg = { ...cfg, proxy_api_key: rotatedKey };
+        await saveConfig(activeCfg);
+        setTempConfig(activeCfg);
+        await restartWith(activeCfg);
+        status = await probeWithRetry(rotatedKey);
+        console.info(`[auto-repair] after key rotation: ${status}`);
+        if (status === 200) return;
+      } else {
+        // 0 / 5xx / other: kill occupier (if any) and restart
+        await restartWith(activeCfg);
+        status = await probeWithRetry(activeCfg.proxy_api_key);
+        console.info(`[auto-repair] after restart: ${status}`);
+        if (status === 200) return;
+      }
+
+      console.warn(`[auto-repair] unable to recover automatically. final status=${status}`);
+    } catch (err) {
+      console.warn('[auto-repair] failed:', err);
+    }
+  };
+
+  // Pre-start port sanity check: if the target port is already occupied by a
+  // non-child process (leftover from a previous session), terminate it so the
+  // new instance can actually bind. Runs only when auto_repair is enabled.
+  const cleanupStaleOccupierBeforeStart = async (cfg: typeof config) => {
+    if (!cfg.auto_repair) return;
+    const port = cfg.server_port;
+    try {
+      const occupier = await getPortOccupier(port);
+      if (!occupier) return;
+      console.info(`[auto-repair] pre-start: port ${port} held by ${occupier.process_name} (PID ${occupier.pid}), terminating`);
+      await terminateProcess(occupier.pid);
+      await sleep(800);
+      // Verify it's gone; if still there, try once more.
+      const still = await getPortOccupier(port);
+      if (still) {
+        console.warn(`[auto-repair] pre-start: occupier still present (PID ${still.pid}), retrying kill`);
+        await terminateProcess(still.pid);
+        await sleep(800);
+      }
+    } catch (e) {
+      console.warn('[auto-repair] pre-start occupier cleanup failed:', e);
+    }
+  };
+
+  // If startServer throws (e.g. health check timed out due to port conflict),
+  // attempt recovery: kill occupier, retry start.
+  const tryAutoRecoverStart = async (cfg: typeof config): Promise<boolean> => {
+    if (!cfg.auto_repair) return false;
+    const host = cfg.server_host === '0.0.0.0' ? '127.0.0.1' : cfg.server_host;
+    const port = cfg.server_port;
+    try {
+      const occupier = await getPortOccupier(port);
+      if (!occupier) {
+        console.warn('[auto-repair] start failed and no port occupier found.');
+        return false;
+      }
+      console.info(`[auto-repair] start failed, terminating occupier ${occupier.process_name} (PID ${occupier.pid})`);
+      await terminateProcess(occupier.pid);
+      await sleep(800);
+      try {
+        await stopServer();
+      } catch {
+        // ignore
+      }
+      await sleep(400);
+      await startServer(cfg);
+      const ok = await waitForHealth(host, port);
+      if (!ok) {
+        console.warn('[auto-repair] health check still failing after occupier kill.');
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn('[auto-repair] start recovery failed:', err);
+      return false;
+    }
+  };
+
   const handleStart = async () => {
     setPendingAction('start');
     try {
+      await cleanupStaleOccupierBeforeStart(config);
       await startServer(config);
+      await runAutoRepair(config);
     } catch (err) {
       console.error(err);
-      setPendingAction(null);
+      const recovered = await tryAutoRecoverStart(config);
+      if (recovered) {
+        await runAutoRepair(config);
+      } else {
+        setPendingAction(null);
+      }
     }
   };
 
@@ -234,7 +413,15 @@ export default function App() {
       // Wait a bit for the server to fully stop
       await new Promise(resolve => setTimeout(resolve, 500));
       setPendingAction('start');
-      await startServer(config);
+      await cleanupStaleOccupierBeforeStart(config);
+      try {
+        await startServer(config);
+      } catch (err) {
+        console.error(err);
+        const recovered = await tryAutoRecoverStart(config);
+        if (!recovered) throw err;
+      }
+      await runAutoRepair(config);
     } catch (err) {
       console.error(err);
       setPendingAction(null);
@@ -286,13 +473,6 @@ export default function App() {
                 label={t('dashboard') || "Dashboard"}
               />
               <NavButton
-                active={currentView === 'account'}
-                onClick={() => setCurrentView('account')}
-                icon={User}
-                label={t('tabAccount')}
-                badge={isRunning}
-              />
-              <NavButton
                 active={currentView === 'chat'}
                 onClick={() => setCurrentView('chat')}
                 icon={MessageCircle}
@@ -337,7 +517,6 @@ export default function App() {
                 <div className="flex items-center gap-3 mb-1">
                   <h1 className="text-2xl font-bold text-[#111] tracking-tight">
                     {currentView === 'dashboard' && t('dashboard')}
-                    {currentView === 'account' && t('tabAccount')}
                     {currentView === 'settings' && t('tabSettings')}
                     {currentView === 'logs' && t('systemLogs')}
                   </h1>
@@ -347,7 +526,6 @@ export default function App() {
                 </div>
                 <p className="text-stone-500 font-medium">
                   {currentView === 'dashboard' && t('dashboardDesc')}
-                  {currentView === 'account' && t('accountDesc')}
                   {currentView === 'settings' && t('settingsDesc')}
                   {currentView === 'logs' && t('logsDesc')}
                 </p>
@@ -509,17 +687,13 @@ export default function App() {
                       <div className="text-2xl font-bold text-[#111]">{config.server_port}</div>
                     </Card>
 
-                    {/* Auth Mode */}
-                    <Card className="flex-1 bg-[#111] text-white border-0 shadow-sm rounded-[32px] px-6 py-4 flex flex-col justify-center relative overflow-hidden">
-                      <div className="absolute top-0 right-0 w-24 h-24 bg-stone-800 rounded-full blur-2xl -translate-y-1/2 translate-x-1/2 opacity-50" />
-                      <div className="flex items-center gap-2 mb-1">
-                        <ShieldCheck className="h-3 w-3 text-stone-400" />
-                        <span className="text-stone-400 font-semibold text-[10px] tracking-wider uppercase">{t('auth')}</span>
-                      </div>
-                      <div className="text-sm font-bold tracking-wide">
-                        {config.auth_method ? config.auth_method.replace(/_/g, ' ').toUpperCase() : t('auto')}
-                      </div>
-                    </Card>
+                    {/* Supported Models */}
+                    <ModelsCard
+                      host={config.server_host}
+                      port={config.server_port}
+                      apiKey={config.proxy_api_key}
+                      isRunning={isRunning}
+                    />
                   </div>
 
                 </div>
@@ -593,17 +767,6 @@ export default function App() {
                     <LogViewer logs={logs} onLogsCleared={() => setLogs([])} />
                   </div>
                 </div>
-              </div>
-            )}
-
-            {currentView === 'account' && (
-              <div className="h-full pb-4">
-                <AccountView
-                  host={config.server_host}
-                  port={config.server_port}
-                  apiKey={config.proxy_api_key}
-                  isRunning={isRunning}
-                />
               </div>
             )}
 

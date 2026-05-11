@@ -43,10 +43,16 @@ pub struct AppConfig {
     pub auto_launch: bool,
     #[serde(default)]
     pub auto_start_server: bool,
+    #[serde(default = "default_auto_repair")]
+    pub auto_repair: bool,
 
     // Client identity
     #[serde(default)]
     pub client_id: Option<String>,
+}
+
+fn default_auto_repair() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -70,6 +76,7 @@ impl Default for AppConfig {
             debug_mode: "off".to_string(),
             auto_launch: false,
             auto_start_server: false,
+            auto_repair: true,
             client_id: None,
         }
     }

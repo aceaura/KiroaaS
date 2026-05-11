@@ -17,12 +17,14 @@ from pathlib import Path
 project_root = Path(SPECPATH).parent.absolute()
 
 a = Analysis(
-    [str(project_root / 'main.py')],
+    [str(project_root / 'app_entry.py')],
     pathex=[str(project_root)],
     binaries=[],
     datas=[
         # Include the kiro module
         (str(project_root / 'kiro'), 'kiro'),
+        # Include local extensions (usage/account routes etc.)
+        (str(project_root / 'extensions'), 'extensions'),
         # Include .env.example as reference
         (str(project_root.parent / '.env.example'), '.'),
     ],
