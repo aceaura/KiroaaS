@@ -82,13 +82,21 @@ impl Default for AppConfig {
     }
 }
 
+/// Get the application data directory (e.g. ~/Library/Application Support/kiroaas).
+///
+/// This is where the app persists mutable state across runs: config.json,
+/// credentials.json, state.json, etc. On macOS packaged builds the app's CWD
+/// is read-only (`/`), so anything the backend writes must go through an
+/// absolute path rooted here.
+pub fn get_app_data_dir() -> Result<PathBuf, String> {
+    Ok(dirs::data_dir()
+        .ok_or("Failed to get app data directory")?
+        .join("kiroaas"))
+}
+
 /// Get the config file path
 fn get_config_path() -> Result<PathBuf, String> {
-    let app_dir = dirs::data_dir()
-        .ok_or("Failed to get app data directory")?
-        .join("kiroaas");
-
-    Ok(app_dir.join("config.json"))
+    Ok(get_app_data_dir()?.join("config.json"))
 }
 
 /// Load configuration from disk

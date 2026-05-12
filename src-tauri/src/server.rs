@@ -1,4 +1,6 @@
 use crate::config::AppConfig;
+#[cfg(not(debug_assertions))]
+use crate::config::get_app_data_dir;
 use serde::{Deserialize, Serialize};
 use std::process::{Child, Command, Stdio};
 use std::io::{BufRead, BufReader};
@@ -81,6 +83,23 @@ impl ServerManager {
         {
             cmd.current_dir("../python-backend");
             cmd.arg("app_entry.py");
+        }
+
+        // In release builds, packaged macOS apps launch with CWD=`/` (read-only),
+        // so any relative-path writes from the backend (credentials.json, state.json,
+        // debug_logs/) will fail with EROFS. Point the backend at the app data dir
+        // via absolute-path env vars, and also set CWD there as a belt-and-braces
+        // fallback for any future relative writes.
+        #[cfg(not(debug_assertions))]
+        {
+            let data_dir = get_app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|e| format!("Failed to create app data dir {}: {}", data_dir.display(), e))?;
+
+            cmd.current_dir(&data_dir);
+            cmd.env("ACCOUNTS_CONFIG_FILE", data_dir.join("credentials.json"));
+            cmd.env("ACCOUNTS_STATE_FILE", data_dir.join("state.json"));
+            cmd.env("DEBUG_DIR", data_dir.join("debug_logs"));
         }
 
         cmd.env("TAURI_MANAGED", "true")
