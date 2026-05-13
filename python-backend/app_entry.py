@@ -36,9 +36,11 @@ from main import (
 )
 
 from extensions.routes_account import router as account_router
+from extensions.tool_name_alias import install_tool_name_aliasing
 
 
 # Mount extension routers on the upstream app.
+install_tool_name_aliasing()
 app.include_router(account_router)
 
 
