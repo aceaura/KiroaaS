@@ -766,14 +766,18 @@ export const SettingsForm = forwardRef<SettingsFormHandle, SettingsFormProps>(fu
             <div className="space-y-6 pt-4">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {/* Version Card */}
-                    <div className="bg-[#111] text-white p-6 rounded-[24px] flex flex-col justify-between relative overflow-hidden">
+                    <button
+                        type="button"
+                        onClick={() => shellOpen('https://kiroaas.hnew.city/').catch(() => {})}
+                        className="bg-[#111] text-white p-6 rounded-[24px] flex flex-col justify-between relative overflow-hidden text-left transition-transform hover:-translate-y-0.5 hover:bg-black focus:outline-none focus:ring-2 focus:ring-stone-400 cursor-pointer"
+                    >
                         <div className="absolute top-0 right-0 w-32 h-32 bg-stone-800 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 opacity-60" />
                         <div className="relative z-10">
                             <span className="text-stone-400 font-semibold text-[10px] tracking-wider uppercase">{t('about')}</span>
                             <div className="text-3xl font-bold tracking-tight mt-1">v{appVersion}</div>
                             <p className="text-stone-400 text-xs mt-2 font-medium">KiroaaS</p>
                         </div>
-                    </div>
+                    </button>
 
                     {/* Update Check Card */}
                     <div
