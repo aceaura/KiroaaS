@@ -49,10 +49,17 @@ def _is_tauri_managed() -> bool:
 
 
 def _resolve_host_for_tauri(cli_host, env_host: str, default_host: str) -> str:
-    """Force 127.0.0.1 when Tauri-managed unless CLI explicitly overrides."""
+    """Resolve bind host. CLI > Rust-provided SERVER_HOST > env > default.
+
+    When Tauri-managed, Rust always sets SERVER_HOST explicitly (either
+    127.0.0.1 or 0.0.0.0 depending on the user's "Allow LAN Access" toggle),
+    so we honor it. Fall back to 127.0.0.1 only if the env var is missing.
+    """
     if cli_host is not None:
         return cli_host
     if _is_tauri_managed():
+        if os.getenv("SERVER_HOST") is not None:
+            return env_host
         return "127.0.0.1"
     if env_host != default_host:
         return env_host

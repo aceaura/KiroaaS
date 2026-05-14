@@ -70,6 +70,22 @@ export function UsageCard({ host, port, apiKey, isRunning }: UsageCardProps) {
       const data: UsageData = await res.json();
       setUsage(data);
       cachedUsage = data;
+
+      const bd = data.usageBreakdownList?.[0];
+      const bonusBd = data.usageBreakdownList?.[1];
+      const ft = bd?.freeTrialInfo;
+      const tLim = ft?.usageLimitWithPrecision ?? ft?.usageLimit ?? 0;
+      const tUsed = ft?.currentUsageWithPrecision ?? ft?.currentUsage ?? 0;
+      const fLim = bd?.usageLimitWithPrecision ?? bd?.usageLimit ?? 0;
+      const fUsed = bd?.currentUsageWithPrecision ?? bd?.currentUsage ?? 0;
+      const bLim = bonusBd?.usageLimitWithPrecision ?? bonusBd?.usageLimit ?? 0;
+      const bUsed = bonusBd?.currentUsageWithPrecision ?? bonusBd?.currentUsage ?? 0;
+      const totalLim = tLim + fLim + bLim;
+      const totalUsed = tUsed + fUsed + bUsed;
+      if (totalLim > 0) {
+        const p = Math.min(100, Math.round((totalUsed / totalLim) * 100));
+        updateTrayUsage(`Credit: ${totalUsed.toLocaleString()} / ${totalLim.toLocaleString()} (${p}%)`).catch(() => {});
+      }
       return true;
     } catch (e) {
       if (!cachedUsage) {
