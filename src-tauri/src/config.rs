@@ -49,6 +49,10 @@ pub struct AppConfig {
     // Client identity
     #[serde(default)]
     pub client_id: Option<String>,
+
+    // KiroaaS Cloud (egress through AWS Lambda when enabled and signed in)
+    #[serde(default)]
+    pub cloud_enabled: bool,
 }
 
 fn default_auto_repair() -> bool {
@@ -78,6 +82,7 @@ impl Default for AppConfig {
             auto_start_server: false,
             auto_repair: true,
             client_id: None,
+            cloud_enabled: false,
         }
     }
 }

@@ -5,6 +5,7 @@
 mod config;
 mod conversations;
 mod server;
+mod cloud_auth;
 
 use auto_launch::AutoLaunch;
 use config::{AppConfig, load_config, save_config};
@@ -868,6 +869,11 @@ fn main() {
             update_tray_language,
             update_tray_usage,
             update_tray_server_state,
+            cloud_auth::cloud_register,
+            cloud_auth::cloud_login,
+            cloud_auth::cloud_logout,
+            cloud_auth::cloud_get_session,
+            cloud_auth::cloud_ping,
         ])
         .on_window_event(|event| {
             #[cfg(target_os = "macos")]

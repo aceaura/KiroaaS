@@ -113,7 +113,20 @@ impl ServerManager {
             .env("FAKE_REASONING_MAX_TOKENS", config.fake_reasoning_max_tokens.to_string())
             .env("TRUNCATION_RECOVERY", config.truncation_recovery.to_string())
             .env("LOG_LEVEL", &config.log_level)
-            .env("DEBUG_MODE", &config.debug_mode);
+            .env("DEBUG_MODE", &config.debug_mode)
+            .env("KIROAAS_CLOUD_ENABLED", config.cloud_enabled.to_string());
+
+        if config.cloud_enabled {
+            let forward = std::env::var("KIROAAS_CLOUD_FORWARD_URL")
+                .unwrap_or_else(|_| "https://cloud.kiroaas.hnew.city/forward".to_string());
+            cmd.env("KIROAAS_CLOUD_FORWARD_URL", forward);
+
+            // Inject the session token via env so the Python child reads it without
+            // touching the OS keychain (cross-binary keychain ACLs would block it).
+            if let Some(token) = crate::cloud_auth::read_token_blocking() {
+                cmd.env("KIROAAS_CLOUD_API_KEY", token);
+            }
+        }
 
         // Set authentication method
         match config.auth_method {
