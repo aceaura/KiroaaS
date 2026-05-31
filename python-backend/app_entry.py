@@ -38,11 +38,13 @@ from main import (
 from extensions.routes_account import router as account_router
 from extensions.tool_name_alias import install_tool_name_aliasing
 from extensions.role_widening import install_role_widening
+from extensions.profile_arn_autofetch import install_profile_arn_autofetch
 
 
 # Mount extension routers on the upstream app.
 install_tool_name_aliasing()
 install_role_widening()
+install_profile_arn_autofetch()
 app.include_router(account_router)
 
 
