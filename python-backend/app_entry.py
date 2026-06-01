@@ -21,6 +21,15 @@ if _HERE not in sys.path:
 import uvicorn
 from loguru import logger
 
+# Widen AnthropicMessage.role BEFORE importing main. FastAPI compiles and
+# caches each route's body validator when the @router.post decorators run,
+# which happens while `from main import app` imports the route modules. If we
+# widen after that, the model itself accepts inline 'system' but the route's
+# already-cached validator still rejects it (422). So this must run first.
+from extensions.role_widening import install_role_widening
+
+install_role_widening()
+
 # Importing main runs module-level setup (logging, FastAPI instance, lifespan).
 from main import (
     app,
@@ -37,13 +46,13 @@ from main import (
 
 from extensions.routes_account import router as account_router
 from extensions.tool_name_alias import install_tool_name_aliasing
-from extensions.role_widening import install_role_widening
 from extensions.profile_arn_autofetch import install_profile_arn_autofetch
 
 
-# Mount extension routers on the upstream app.
+# Mount extension routers on the upstream app. (tool-name aliasing and
+# profile-ARN autofetch wrap functions/methods at runtime, so unlike
+# role widening they are insensitive to import/registration order.)
 install_tool_name_aliasing()
-install_role_widening()
 install_profile_arn_autofetch()
 app.include_router(account_router)
 
