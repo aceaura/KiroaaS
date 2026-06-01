@@ -47,6 +47,7 @@ from main import (
 from extensions.routes_account import router as account_router
 from extensions.tool_name_alias import install_tool_name_aliasing
 from extensions.profile_arn_autofetch import install_profile_arn_autofetch
+from extensions.control_plane_host import install_control_plane_host_redirect
 
 
 # Mount extension routers on the upstream app. (tool-name aliasing and
@@ -54,6 +55,7 @@ from extensions.profile_arn_autofetch import install_profile_arn_autofetch
 # role widening they are insensitive to import/registration order.)
 install_tool_name_aliasing()
 install_profile_arn_autofetch()
+install_control_plane_host_redirect()
 app.include_router(account_router)
 
 

@@ -45,7 +45,10 @@ async def get_usage(request: Request):
     headers["x-amz-target"] = "com.amazon.aws.codewhisperer.runtime.AmazonCodeWhispererService.GetUsageLimits"
     headers["Content-Type"] = "application/x-amz-json-1.0"
 
-    url = auth_manager.api_host
+    # GetUsageLimits lives on q.amazonaws.com; runtime.kiro.dev 400s with
+    # UnknownOperationException. q_host is redirected there by the
+    # control_plane_host extension.
+    url = auth_manager.q_host
     body = {"origin": "AI_EDITOR", "isEmailRequired": True}
 
     try:
@@ -79,7 +82,9 @@ async def get_account(request: Request):
         headers["x-amz-target"] = "com.amazon.aws.codewhisperer.runtime.AmazonCodeWhispererService.GetUsageLimits"
         headers["Content-Type"] = "application/x-amz-json-1.0"
 
-        url = auth_manager.api_host
+        # GetUsageLimits lives on q.amazonaws.com (redirected q_host), not
+        # runtime.kiro.dev which only serves the chat operation.
+        url = auth_manager.q_host
         body = {"origin": "AI_EDITOR", "isEmailRequired": True}
 
         logger.debug(f"Calling Kiro API with headers: {headers}")
