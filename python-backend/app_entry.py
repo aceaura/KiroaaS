@@ -30,6 +30,14 @@ from extensions.role_widening import install_role_widening
 
 install_role_widening()
 
+# Widen AnthropicMessage.content to accept Anthropic server-side tool blocks
+# (server_tool_use / web_search_tool_result) that clients replay into history.
+# Same import-order constraint as role widening: must run before the route
+# modules are imported so FastAPI compiles the widened body validator.
+from extensions.server_tool_blocks import install_server_tool_blocks
+
+install_server_tool_blocks()
+
 # Importing main runs module-level setup (logging, FastAPI instance, lifespan).
 from main import (
     app,
