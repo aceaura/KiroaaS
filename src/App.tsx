@@ -8,11 +8,13 @@ import { CCSwitchImport } from './components/CCSwitchImport';
 import { UsageCard } from './components/UsageCard';
 import { ModelsCard } from './components/ModelsCard';
 import { ChatView } from './components/ChatView';
+import { CloudView } from './components/CloudView';
 import { useConfig } from './hooks/useConfig';
+import type { AppConfig } from './lib/config';
 import { useI18n } from './hooks/useI18n';
 import { useServerStatus } from './hooks/useServerStatus';
 import { useConversations } from './hooks/useConversations';
-import { startServer, stopServer, getServerLogs, getAppVersion, getDeviceModel, updateTrayServerState, getPortOccupier, terminateProcess } from './lib/tauri';
+import { startServer, stopServer, getServerLogs, getAppVersion, getDeviceModel, updateTrayServerState, getPortOccupier, terminateProcess, cloudGetSession } from './lib/tauri';
 import { checkVersionUpdate } from './lib/versionCheck';
 import { platform, arch, version } from '@tauri-apps/api/os';
 
@@ -34,9 +36,10 @@ import {
   AlertTriangle,
   CheckCircle,
   X,
+  Cloud,
 } from 'lucide-react';
 
-type View = 'dashboard' | 'settings' | 'logs' | 'chat';
+type View = 'dashboard' | 'settings' | 'logs' | 'chat' | 'cloud';
 
 export default function App() {
   const { config, saveConfig, isLoading: isConfigLoading, error: configError } = useConfig();
@@ -61,6 +64,7 @@ export default function App() {
   const [settingsHint, setSettingsHint] = useState<SettingsHintKey>(null);
   const [isRestarting, setIsRestarting] = useState(false);
   const [isMac, setIsMac] = useState(true);
+  const [hasCloudSession, setHasCloudSession] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState<SettingsFormStatus | null>(null);
   const settingsFormRef = useRef<SettingsFormHandle>(null);
   const lastLogLineRef = useRef('');
@@ -76,6 +80,12 @@ export default function App() {
   useEffect(() => {
     platform().then(p => setIsMac(p === 'darwin'));
   }, []);
+
+  // Track cloud sign-in state for dashboard indicator
+  const refreshCloudSession = () => {
+    cloudGetSession().then(s => setHasCloudSession(s.hasToken)).catch(() => setHasCloudSession(false));
+  };
+  useEffect(() => { refreshCloudSession(); }, []);
 
   // Clear pending action when server status changes to a stable state
   useEffect(() => {
@@ -405,7 +415,8 @@ export default function App() {
     setTempConfig(newConfig);
   };
 
-  const handleRestartServer = async () => {
+  const handleRestartServer = async (overrideConfig?: AppConfig) => {
+    const cfg = overrideConfig ?? config;
     setIsRestarting(true);
     setPendingAction('stop');
     try {
@@ -413,15 +424,15 @@ export default function App() {
       // Wait a bit for the server to fully stop
       await new Promise(resolve => setTimeout(resolve, 500));
       setPendingAction('start');
-      await cleanupStaleOccupierBeforeStart(config);
+      await cleanupStaleOccupierBeforeStart(cfg);
       try {
-        await startServer(config);
+        await startServer(cfg);
       } catch (err) {
         console.error(err);
-        const recovered = await tryAutoRecoverStart(config);
+        const recovered = await tryAutoRecoverStart(cfg);
         if (!recovered) throw err;
       }
-      await runAutoRepair(config);
+      await runAutoRepair(cfg);
     } catch (err) {
       console.error(err);
       setPendingAction(null);
@@ -473,6 +484,13 @@ export default function App() {
                 label={t('dashboard') || "Dashboard"}
               />
               <NavButton
+                active={currentView === 'cloud'}
+                onClick={() => setCurrentView('cloud')}
+                icon={Cloud}
+                label="KiroaaS Cloud"
+                badgeLabel="Beta"
+              />
+              <NavButton
                 active={currentView === 'chat'}
                 onClick={() => setCurrentView('chat')}
                 icon={MessageCircle}
@@ -515,10 +533,18 @@ export default function App() {
             <header data-tauri-drag-region className="px-8 lg:px-10 py-5 flex items-start justify-between flex-shrink-0 z-10 min-h-[70px]">
               <div className="pt-2">
                 <div className="flex items-center gap-3 mb-1">
-                  <h1 className="text-2xl font-bold text-[#111] tracking-tight">
-                    {currentView === 'dashboard' && t('dashboard')}
-                    {currentView === 'settings' && t('tabSettings')}
-                    {currentView === 'logs' && t('systemLogs')}
+                  <h1 className="text-2xl font-bold text-[#111] tracking-tight flex items-baseline gap-2">
+                    <span>
+                      {currentView === 'dashboard' && t('dashboard')}
+                      {currentView === 'settings' && t('tabSettings')}
+                      {currentView === 'logs' && t('systemLogs')}
+                      {currentView === 'cloud' && 'KiroaaS Cloud'}
+                    </span>
+                    {currentView === 'cloud' && (
+                      <span className="self-center text-xs font-semibold lowercase tracking-tight px-2.5 py-1 rounded-full bg-[#1a1a1a] text-white leading-none">
+                        beta
+                      </span>
+                    )}
                   </h1>
                   {configError && (
                     <Badge variant="destructive" className="rounded-full px-3 py-1">{t('configurationError')}</Badge>
@@ -528,12 +554,16 @@ export default function App() {
                   {currentView === 'dashboard' && t('dashboardDesc')}
                   {currentView === 'settings' && t('settingsDesc')}
                   {currentView === 'logs' && t('logsDesc')}
+                  {currentView === 'cloud' && t('cloudPageDesc')}
                 </p>
               </div>
 
               <div className="flex items-center gap-4">
                 {/* Main Action Button */}
-                {currentView === 'dashboard' && (
+                {currentView === 'dashboard' && (() => {
+                  const cloudWillBeUsed = config.cloud_enabled && hasCloudSession;
+                  const showCloudStartLabel = cloudWillBeUsed && !isRunning && !isStarting;
+                  return (
                   <>
                   <Button
                     className={`h-12 rounded-full px-6 font-semibold shadow-lg transition-all duration-300 ${isRunning
@@ -547,16 +577,24 @@ export default function App() {
                       <Loader2 className="mr-2 h-5 w-5 animate-spin" />
                     ) : isRunning ? (
                       <Square className="mr-2 h-5 w-5 fill-current" />
+                    ) : showCloudStartLabel ? (
+                      <Cloud className="mr-2 h-5 w-5" />
                     ) : (
                       <Play className="mr-2 h-5 w-5 fill-current" />
                     )}
-                    {isRunning ? (isStopping ? t('stopping') : t('stopServer')) : (isStarting ? t('starting') : t('startServer'))}
+                    {isRunning
+                      ? (isStopping ? t('stopping') : t('stopServer'))
+                      : isStarting
+                        ? t('starting')
+                        : showCloudStartLabel
+                          ? t('cloudReadyBadge')
+                          : t('startServer')}
                   </Button>
                   {isRunning && (
                     <Button
                       variant="outline"
                       className="h-12 rounded-full px-6 font-semibold border-stone-300 hover:bg-stone-100 transition-all duration-300"
-                      onClick={handleRestartServer}
+                      onClick={() => handleRestartServer()}
                       disabled={isProcessing}
                     >
                       {isRestarting ? (
@@ -568,7 +606,8 @@ export default function App() {
                     </Button>
                   )}
                   </>
-                )}
+                  );
+                })()}
 
                 {/* Settings Save Button in Header */}
                 {currentView === 'settings' && (
@@ -650,6 +689,15 @@ export default function App() {
                             <Activity className={`h-4 w-4 ${isRunning ? 'text-lime-900' : 'text-stone-400'}`} />
                           </div>
                           <span className={`font-semibold tracking-wide text-xs ${isRunning ? 'text-lime-900' : 'text-stone-500'}`}>{t('gatewayStatus')}</span>
+                          {config.cloud_enabled && hasCloudSession && isRunning && (
+                            <span
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide bg-black text-[#D9F99D]"
+                              title="KiroaaS Cloud"
+                            >
+                              <Cloud className="h-3 w-3" />
+                              {t('cloudActiveBadge')}
+                            </span>
+                          )}
                         </div>
                         <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${isRunning ? 'bg-black text-[#D9F99D]' : 'bg-stone-100 text-stone-500'}`}>
                           {isRunning ? t('active') : t('offline')}
@@ -789,6 +837,25 @@ export default function App() {
               </div>
             )}
 
+            {currentView === 'cloud' && (
+              <CloudView
+                enabled={config.cloud_enabled}
+                onEnabledChange={async (enabled) => {
+                  const next = { ...config, cloud_enabled: enabled };
+                  await saveConfig(next);
+                  if (isRunning) {
+                    handleRestartServer(next);
+                  }
+                }}
+                onAuthChanged={() => {
+                  refreshCloudSession();
+                  if (config.cloud_enabled && isRunning) {
+                    handleRestartServer(config);
+                  }
+                }}
+              />
+            )}
+
           </div>
         </main>
       </div>
@@ -797,7 +864,7 @@ export default function App() {
 }
 
 // Updated NavButton Component
-function NavButton({ active, onClick, icon: Icon, label, badge }: { active: boolean, onClick: () => void, icon: any, label: string, badge?: boolean }) {
+function NavButton({ active, onClick, icon: Icon, label, badge, badgeLabel }: { active: boolean, onClick: () => void, icon: any, label: string, badge?: boolean, badgeLabel?: string }) {
   return (
     <button
       onClick={onClick}
@@ -815,8 +882,13 @@ function NavButton({ active, onClick, icon: Icon, label, badge }: { active: bool
           <span className="absolute -top-1 -right-1 h-2.5 w-2.5 bg-lime-400 rounded-full border-2 border-[#2A2A2A]" />
         )}
       </div>
-      <span className={`hidden lg:block font-medium text-sm tracking-wide ${active ? 'text-white' : ''}`}>
+      <span className={`hidden lg:flex items-baseline gap-1.5 font-medium text-sm tracking-wide whitespace-nowrap ${active ? 'text-white' : ''}`}>
         {label}
+        {badgeLabel && (
+          <span className="text-[9px] font-medium lowercase tracking-tight text-lime-400/80">
+            {badgeLabel}
+          </span>
+        )}
       </span>
 
       {active && <div className="absolute left-0 top-1/2 -translate-y-1/2 h-8 w-1 bg-lime-400 rounded-r-full lg:hidden" />}

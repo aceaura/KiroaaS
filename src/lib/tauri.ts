@@ -129,3 +129,38 @@ export async function updateTrayUsage(text: string): Promise<void> {
 export async function updateTrayServerState(running: boolean): Promise<void> {
   return await invoke('update_tray_server_state', { running });
 }
+
+export interface CloudSession {
+  email: string;
+  hasToken: boolean;
+  expiresAt?: number | null;
+}
+
+export async function cloudRegister(email: string, password: string): Promise<CloudSession> {
+  return await invoke('cloud_register', { email, password });
+}
+
+export async function cloudLogin(email: string, password: string): Promise<CloudSession> {
+  return await invoke('cloud_login', { email, password });
+}
+
+export async function cloudLogout(): Promise<void> {
+  return await invoke('cloud_logout');
+}
+
+export async function cloudGetSession(): Promise<CloudSession> {
+  return await invoke('cloud_get_session');
+}
+
+export interface CloudPingResult {
+  ok: boolean;
+  email?: string | null;
+  expiresAt?: number | null;
+  status: number;
+  error?: string | null;
+  latencyMs?: number | null;
+}
+
+export async function cloudPing(): Promise<CloudPingResult> {
+  return await invoke('cloud_ping');
+}

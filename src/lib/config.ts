@@ -38,6 +38,9 @@ export interface AppConfig {
 
   // Client identity
   client_id?: string;
+
+  // KiroaaS Cloud
+  cloud_enabled: boolean;
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -56,6 +59,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   auto_launch: false,
   auto_start_server: false,
   auto_repair: true,
+  cloud_enabled: false,
 };
 
 export interface ServerStatusInfo {
