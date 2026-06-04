@@ -57,6 +57,7 @@ from extensions.tool_name_alias import install_tool_name_aliasing
 from extensions.cloud_connector import install_cloud_connector
 from extensions.profile_arn_autofetch import install_profile_arn_autofetch
 from extensions.control_plane_host import install_control_plane_host_redirect
+from extensions.chat_host_fallback import install_chat_host_fallback
 from extensions.model_id_format import install_model_id_format
 
 
@@ -67,6 +68,7 @@ install_tool_name_aliasing()
 install_cloud_connector()
 install_profile_arn_autofetch()
 install_control_plane_host_redirect()
+install_chat_host_fallback()
 # Dash-format Claude model IDs on /v1/models for Claude-family clients. Added as
 # a response middleware (Starlette builds the stack lazily at startup, so adding
 # it post-import still takes effect) rather than wrapping the already-registered
