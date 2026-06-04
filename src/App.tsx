@@ -689,19 +689,20 @@ export default function App() {
                             <Activity className={`h-4 w-4 ${isRunning ? 'text-lime-900' : 'text-stone-400'}`} />
                           </div>
                           <span className={`font-semibold tracking-wide text-xs ${isRunning ? 'text-lime-900' : 'text-stone-500'}`}>{t('gatewayStatus')}</span>
-                          {config.cloud_enabled && hasCloudSession && isRunning && (
-                            <span
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide bg-black text-[#D9F99D]"
-                              title="KiroaaS Cloud"
-                            >
-                              <Cloud className="h-3 w-3" />
-                              {t('cloudActiveBadge')}
-                            </span>
-                          )}
                         </div>
-                        <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${isRunning ? 'bg-black text-[#D9F99D]' : 'bg-stone-100 text-stone-500'}`}>
-                          {isRunning ? t('active') : t('offline')}
-                        </div>
+                        {config.cloud_enabled && hasCloudSession && isRunning ? (
+                          <div
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wide bg-black text-[#D9F99D]"
+                            title="KiroaaS Cloud"
+                          >
+                            <Cloud className="h-3 w-3" />
+                            {t('cloudActiveBadge')}
+                          </div>
+                        ) : (
+                          <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${isRunning ? 'bg-black text-[#D9F99D]' : 'bg-stone-100 text-stone-500'}`}>
+                            {isRunning ? t('active') : t('offline')}
+                          </div>
+                        )}
                       </div>
 
                       <div>
