@@ -2,7 +2,7 @@
  * Internationalization (i18n) support
  */
 
-export type Language = 'zh' | 'en' | 'ru' | 'es' | 'id' | 'pt' | 'ja' | 'ko';
+export type Language = 'zh' | 'en' | 'ru' | 'es' | 'id' | 'pt' | 'ja' | 'ko' | 'vi';
 
 export const translations = {
   zh: {
@@ -2740,6 +2740,349 @@ export const translations = {
     cloudStatusChecking: '연결 확인 중…',
     cloudStatusUnreachable: 'KiroaaS Cloud에 연결할 수 없습니다',
     cloudStatusExpired: '세션이 만료되었습니다. 다시 로그인하세요',
+  },
+  vi: {
+    // App
+    appTitle: 'KiroaaS',
+    dashboard: 'Bảng điều khiển',
+
+    // Tabs
+    tabSettings: 'Cài đặt',
+    tabLogs: 'Nhật ký',
+
+    // Server Control
+    serverControl: 'Điều khiển máy chủ',
+    serverControlDesc: 'Quản lý máy chủ KiroaaS',
+    startServer: 'Khởi động máy chủ',
+    stopServer: 'Dừng máy chủ',
+    starting: 'Đang khởi động...',
+    stopping: 'Đang dừng...',
+    runningOnPort: 'Đang chạy trên cổng',
+    configureApiKeyFirst:
+      'Vui lòng cấu hình thông tin xác thực trong tab Cài đặt trước khi khởi động máy chủ.',
+    startServerFailed: 'Không thể khởi động máy chủ',
+    stopServerFailed: 'Không thể dừng máy chủ',
+
+    // Status
+    statusStopped: 'Đã dừng',
+    statusStarting: 'Đang khởi động',
+    statusRunning: 'Đang chạy',
+    statusError: 'Lỗi',
+
+    // Settings Form
+    authSettings: 'Xác thực',
+    authMethod: 'Phương thức xác thực',
+    authRefreshToken: 'Refresh Token',
+    authCredsFile: 'Tệp thông tin xác thực',
+    authCliDb: 'Cơ sở dữ liệu Kiro CLI',
+    refreshToken: 'Refresh Token',
+    refreshTokenPlaceholder: 'Nhập refresh token của bạn',
+    credsFilePath: 'Đường dẫn tệp thông tin xác thực',
+    cliDbPath: 'Đường dẫn cơ sở dữ liệu Kiro CLI',
+
+    securitySettings: 'Bảo mật',
+    proxyApiKey: 'Khóa API proxy',
+    proxyApiKeyPlaceholder: 'Khóa siêu bí mật của bạn',
+    proxyApiKeyDesc: 'Khóa này cần thiết để truy cập API gateway',
+    generate: 'Tạo',
+    generateApiKey: 'Tạo khóa API ngẫu nhiên',
+
+    serverSettings: 'Máy chủ',
+    host: 'Host',
+    port: 'Cổng',
+    region: 'Khu vực',
+    regionUsEast: 'Đông Hoa Kỳ (N. Virginia)',
+    regionUsWest: 'Tây Hoa Kỳ (Oregon)',
+    regionEuWest: 'EU (Ireland)',
+    regionApSoutheast: 'Châu Á - Thái Bình Dương (Singapore)',
+
+    saveSettings: 'Lưu cài đặt',
+    saving: 'Đang lưu...',
+    saveSuccess: 'Đã lưu cài đặt thành công!',
+    saveFailed: 'Không thể lưu cài đặt',
+
+    // Credential scanning
+    scanCredentials: 'Quét thông tin xác thực',
+    scanningCredentials: 'Đang quét...',
+    foundCredentials: 'Đã tìm thấy {count} tệp thông tin xác thực',
+    noCredentialsFound: 'Không tìm thấy tệp thông tin xác thực',
+    selectCredential: 'Chọn tệp thông tin xác thực',
+    scanFailed: 'Quét thất bại',
+    credentialsFound: 'Đã phát hiện thông tin xác thực',
+    autoDetectedCredentials:
+      'Chúng tôi đã tự động phát hiện các thông tin xác thực sau trên hệ thống của bạn:',
+    useRecommended: 'Dùng đề xuất',
+    dismiss: 'Bỏ qua',
+    confirm: 'Xác nhận',
+    found: 'tìm thấy',
+
+    // Advanced Settings
+    advancedSettings: 'Cài đặt nâng cao',
+    vpnProxy: 'VPN/Proxy',
+    vpnProxyUrl: 'URL proxy VPN',
+    vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
+    vpnProxyUrlDesc: 'Máy chủ proxy tùy chọn cho kết nối VPN',
+
+    timeoutSettings: 'Thời gian chờ',
+    firstTokenTimeout: 'Thời gian chờ token đầu tiên (giây)',
+    streamingReadTimeout: 'Thời gian chờ đọc streaming (giây)',
+
+    featureSettings: 'Tính năng',
+    enableFakeReasoning: 'Bật suy luận giả lập',
+    maxTokens: 'Số token tối đa',
+    enableTruncationRecovery: 'Bật khôi phục khi bị cắt ngắn',
+
+    logSettings: 'Ghi nhật ký',
+    logLevel: 'Mức nhật ký',
+    logDebug: 'DEBUG',
+    logInfo: 'INFO',
+    logWarning: 'CẢNH BÁO',
+    logError: 'LỖI',
+    debugMode: 'Chế độ gỡ lỗi',
+    debugOff: 'Tắt',
+    debugOn: 'Bật',
+    debugVerbose: 'Chi tiết',
+
+    // Log Viewer
+    serverLogs: 'Nhật ký máy chủ',
+    autoScroll: 'Tự động cuộn',
+    export: 'Xuất',
+    clear: 'Xóa',
+    noLogs: 'Chưa có nhật ký. Khởi động máy chủ để xem nhật ký.',
+
+    // Footer
+    reportIssue: 'Báo cáo sự cố',
+
+    // Errors
+    configError: 'Lỗi cấu hình',
+    loadingConfig: 'Đang tải cấu hình...',
+    retry: 'Thử lại',
+
+    // Language
+    language: 'Ngôn ngữ',
+
+    // Dashboard
+    operations: 'Vận hành',
+    systemLogs: 'Nhật ký hệ thống',
+    configurationError: 'Lỗi cấu hình',
+    dashboardDesc: 'Quản lý gateway và trạng thái kết nối của bạn tại đây.',
+    settingsDesc: 'Cấu hình xác thực và cài đặt proxy.',
+    logsDesc: 'Luồng hoạt động máy chủ theo thời gian thực.',
+    gatewayStatus: 'TRẠNG THÁI GATEWAY',
+    active: 'Hoạt động',
+    offline: 'Ngoại tuyến',
+    online: 'TRỰC TUYẾN',
+    stopped: 'ĐÃ DỪNG',
+    servingOnPort: 'Đang xử lý yêu cầu trên cổng {port}',
+    readyToInitialize: 'Sẵn sàng khởi tạo kết nối',
+    listeningPort: 'Cổng lắng nghe',
+    auth: 'Xác thực',
+    auto: 'TỰ ĐỘNG',
+    liveActivity: 'Hoạt động trực tiếp',
+    expand: 'Mở rộng',
+    waitingForEvents: 'Đang chờ sự kiện máy chủ...',
+    advanced: 'Nâng cao',
+    proTip: 'Mẹo',
+    proTipDesc:
+      'Nếu bạn không có Khóa API proxy do quản trị viên cung cấp, hãy dùng nút "Tạo" để tạo một khóa an toàn.',
+    administrator: 'Quản trị viên',
+
+    // API Examples
+    apiExamples: 'Ví dụ API',
+    copy: 'Sao chép',
+    copied: 'Đã sao chép',
+
+    // Chat
+    tabChat: 'Trò chuyện',
+    chatDesc: 'Trò chuyện với các mô hình AI.',
+    chatWelcome: 'Bắt đầu cuộc trò chuyện',
+    chatWelcomeDesc: 'Gửi tin nhắn để bắt đầu trò chuyện với AI',
+    chatPlaceholder: 'Nhập tin nhắn...',
+    chatServerOffline: 'Máy chủ ngoại tuyến',
+    chatServerOfflineDesc: 'Vui lòng khởi động máy chủ trước',
+    chatError: 'Không thể gửi tin nhắn',
+
+    // Conversations
+    newChat: 'Trò chuyện mới',
+    conversations: 'Cuộc trò chuyện',
+    renameConversation: 'Đổi tên cuộc trò chuyện',
+    deleteConversation: 'Xóa cuộc trò chuyện',
+    deleteConfirm: 'Xóa cuộc trò chuyện này?',
+    noConversations: 'Chưa có cuộc trò chuyện nào',
+    untitledConversation: 'Cuộc trò chuyện không tên',
+
+    // CC Switch Import
+    ccSwitchImport: 'Nhập vào CC Switch',
+    ccSwitchIntro: 'CC Switch là trình quản lý cấu hình Claude Code cho phép chuyển đổi nhanh giữa các nhà cung cấp API khác nhau.',
+    ccSwitchImportDesc: 'Nhập cấu hình này vào CC Switch bằng một cú nhấp để Claude Code sử dụng gateway KiroaaS.',
+    importToCCSwitch: 'Nhập vào CC Switch',
+    importing: 'Đang nhập...',
+    importSuccess: 'Nhập thành công',
+    notConfigured: 'Chưa cấu hình',
+
+    // Settings Form
+    authenticationMethod: 'Phương thức xác thực',
+    howGatewayConnects: 'Cách gateway kết nối với các dịch vụ Kiro.',
+    sqliteDatabasePath: 'Đường dẫn cơ sở dữ liệu SQLite',
+    credentialsFilePath: 'Đường dẫn tệp thông tin xác thực',
+    security: 'Bảo mật',
+    protectEndpoint: 'Bảo vệ điểm cuối gateway của bạn.',
+    hide: 'Ẩn',
+    show: 'Hiện',
+    realValue: 'Giá trị thực',
+    clientsIncludeKey:
+      'Máy khách (như Cursor hoặc VS Code) phải đưa khóa này vào tiêu đề Authorization.',
+    savedSuccessfully: 'Đã lưu thành công',
+    savingChanges: 'Đang lưu thay đổi...',
+    saveConfiguration: 'Lưu cấu hình',
+    repairService: 'Sửa chữa dịch vụ',
+    serviceRepairDesc: 'Tự động khởi động lại gateway và chạy tự kiểm tra kết nối; nếu phát hiện 401, tự động xoay vòng Proxy API Key.',
+    serviceRepairRunning: 'Đang chạy quy trình sửa chữa...',
+    serviceRepairRunningShort: 'Đang sửa chữa...',
+    serviceRepairSuccess: 'Sửa chữa hoàn tất: dịch vụ hoạt động tốt và đã vượt qua tự kiểm tra.',
+    serviceRepairSuccessWithKeyReset: 'Sửa chữa hoàn tất: Proxy API Key đã được xoay vòng và dịch vụ khởi động lại. Hãy cập nhật khóa trên các máy khách bên ngoài.',
+    serviceRepairRotatingKey: 'Phát hiện 401. Đang xoay vòng Proxy API Key và khởi động lại dịch vụ...',
+    serviceRepairHealthTimeout: 'Khởi động dịch vụ quá thời gian. Hãy kiểm tra xung đột cổng hoặc môi trường cục bộ.',
+    serviceRepairKeyMismatch: 'Vẫn nhận 401: khóa cục bộ không khớp. Hãy kiểm tra xem có instance cũ đang chiếm cổng không.',
+    serviceRepairCredentialIssue: 'Nhận 403: hãy xác minh thông tin xác thực tài khoản Kiro.',
+    serviceRepairConnectionFailed: 'Không thể kết nối tới gateway cục bộ. Hãy đảm bảo dịch vụ đang chạy.',
+    serviceRepairFailedWithStatus: 'Tự kiểm tra thất bại với mã trạng thái HTTP: {status}',
+    serviceRepairPortConflictPrompt: 'Cổng {port} đang bị tiến trình {name} (PID {pid}) chiếm dụng. Đóng nó và tiếp tục sửa chữa?',
+    serviceRepairPortCloseCancelled: 'Tiến trình chiếm cổng chưa được đóng. Vui lòng xử lý thủ công rồi thử lại.',
+    serviceRepairKillingProcess: 'Đang đóng tiến trình chiếm cổng: {name} (PID {pid})...',
+    serviceRepairSuccessAfterPortCleanup: 'Sửa chữa hoàn tất: đã giải phóng xung đột cổng và khôi phục dịch vụ.',
+    serviceRepairCloseOccupierAndContinue: 'Đóng tiến trình chiếm dụng và tiếp tục',
+    serviceRepairKeepOccupier: 'Giữ tiến trình chiếm dụng',
+
+    // Log Viewer
+    systemOutput: 'Đầu ra hệ thống',
+    eventsCaptured: 'Đã ghi nhận {count} sự kiện',
+    live: 'Trực tiếp',
+    paused: 'Tạm dừng',
+    noLogsAvailable: 'Không có nhật ký để hiển thị',
+    resumeFeed: 'Tiếp tục luồng',
+
+    // Advanced Settings
+    vpnProxyTunnel: 'Đường hầm VPN / Proxy',
+    timeoutsSeconds: 'Thời gian chờ (giây)',
+    firstToken: 'Token đầu tiên',
+    streamRead: 'Đọc luồng',
+    lanAccess: 'Truy cập LAN',
+    enableLanAccess: 'Cho phép truy cập LAN',
+    lanAccessDesc: 'Khi bật, các thiết bị khác trong mạng cục bộ có thể truy cập máy chủ. Khi tắt, chỉ máy này mới truy cập được.',
+    thinkingOutput: 'Đầu ra Thinking',
+    showThinkingProcess: 'Hiển thị quá trình Thinking',
+    showThinkingProcessDesc: 'Khi bật, đầu ra thinking/reasoning được hiển thị qua các API tương thích. Khi tắt, đầu ra đó bị ẩn.',
+    autoLaunch: 'Khởi chạy khi mở máy',
+    autoLaunchDesc: 'Tự động khởi chạy ứng dụng khi hệ thống khởi động',
+    autoStartServer: 'Tự động khởi động máy chủ',
+    autoStartServerDesc: 'Tự động khởi động máy chủ khi mở ứng dụng',
+    autoRepair: 'Tự động sửa chữa',
+    autoRepairDesc: 'Tự động phát hiện và khôi phục dịch vụ khi khởi động/khởi động lại',
+    serverPort: 'Cổng máy chủ',
+    serverPortDesc: 'Cổng mà máy chủ lắng nghe. Cần khởi động lại sau khi thay đổi.',
+
+    // Config restart
+    configSavedRestartPrompt: 'Đã lưu cấu hình. Khởi động lại máy chủ với cài đặt mới?',
+    configChangeHint: 'Các thay đổi cần được lưu và khởi động lại máy chủ để có hiệu lực',
+    restartServer: 'Khởi động lại',
+    trayShowWindow: 'Hiện cửa sổ',
+    trayHideWindow: 'Ẩn cửa sổ',
+    trayQuit: 'Thoát',
+    skipRestart: 'Để sau',
+
+    // Tooltips
+    tooltip_auth_cli_db: 'Xác thực bằng thông tin xác thực từ cơ sở dữ liệu SQLite cục bộ của Kiro CLI',
+    tooltip_auth_creds_file: 'Xác thực bằng tệp thông tin xác thực JSON từ bộ nhớ đệm AWS SSO',
+    tooltip_auth_refresh_token: 'Xác thực trực tiếp bằng refresh token (nhập thủ công)',
+    tooltip_proxy_api_key: 'Khóa bí mật mà máy khách phải đưa vào khi truy cập gateway để bảo vệ điểm cuối API',
+    tooltip_generate: 'Tạo ngẫu nhiên một khóa API an toàn với tiền tố sk-',
+    tooltip_check_update: 'Kết nối tới máy chủ để kiểm tra xem có phiên bản mới hay không',
+    tooltip_save: 'Lưu tất cả cài đặt hiện tại vào tệp cấu hình cục bộ',
+
+    // About & Updates
+    about: 'Giới thiệu',
+    checkForUpdates: 'Kiểm tra cập nhật',
+    checkingForUpdates: 'Đang kiểm tra...',
+    updateAvailable: 'Đã có phiên bản mới {version}',
+    noUpdateAvailable: 'Bạn đang dùng phiên bản mới nhất',
+    downloadUpdate: 'Tải xuống',
+    updateCheckFailed: 'Không thể kiểm tra cập nhật',
+    installing: 'Đang cài đặt...',
+    changelog: 'Nhật ký thay đổi',
+
+    // Usage Card
+    creditUsage: 'Sử dụng Credit',
+    usageServerOffline: 'Khởi động máy chủ để xem mức sử dụng',
+    usageLoadFailed: 'Không thể tải mức sử dụng',
+    usageUsed: 'Đã dùng',
+    usageResets: 'Đặt lại',
+    usageOverage: 'Vượt mức',
+    usageOverageOn: 'Đã bật',
+    usageOverageOff: 'Đã tắt',
+
+    // Models Card
+    supportedModels: 'Mô hình được hỗ trợ',
+    modelsServerOffline: 'Khởi động máy chủ để xem mô hình',
+    modelsLoadFailed: 'Không thể tải mô hình',
+    modelsEmpty: 'Không có mô hình khả dụng',
+    modelsClickToView: 'Nhấp để xem',
+
+    // Account
+    tabAccount: 'Tài khoản',
+    accountDesc: 'Xem thông tin tài khoản và mức sử dụng hạn ngạch của bạn.',
+    accountInformation: 'Thông tin tài khoản',
+    accountServerOffline: 'Khởi động máy chủ để xem thông tin tài khoản',
+    accountLoadFailed: 'Không thể tải thông tin tài khoản',
+    noAccountData: 'Không có dữ liệu tài khoản',
+    account: 'Tài khoản',
+    plan: 'Gói',
+    totalQuota: 'Tổng hạn ngạch',
+    currentUsage: 'Mức sử dụng hiện tại',
+    remainingQuota: 'Hạn ngạch còn lại',
+    status: 'Trạng thái',
+    trialPlan: 'Gói dùng thử',
+    expiresOn: 'Hết hạn vào',
+    subscriptionExpiry: 'Hết hạn đăng ký',
+    usageProgress: 'Tiến độ sử dụng',
+    resetDate: 'Ngày đặt lại',
+    overageStatus: 'Trạng thái vượt mức',
+    enabled: 'Đã bật',
+    disabled: 'Đã tắt',
+    signedInWith: 'Đăng nhập bằng',
+    bonusCredits: 'Credit thưởng',
+    quota: 'Hạn ngạch',
+    cloudPageDesc: 'Vượt qua hạn chế, lấy lại Claude của bạn',
+    cloudEnableTitle: 'Bật KiroaaS Cloud',
+    cloudEnableDesc: 'Khi bật, các yêu cầu tới mô hình Kiro sẽ được chuyển tiếp qua KiroaaS Cloud để vượt qua hạn chế mạng. Hãy đăng nhập trước.',
+    cloudPrivacyNote: 'Chúng tôi không thu thập hoặc lưu trữ thông tin xác thực Kiro của bạn — chúng vẫn nằm trên thiết bị của bạn và không được tải lên.',
+    cloudActiveBadge: 'Đã kết nối qua KiroaaS Cloud',
+    cloudReadyBadge: 'Sẽ khởi động qua KiroaaS Cloud',
+    cloudLoginNeeded: 'KiroaaS Cloud đã được bật nhưng bạn chưa đăng nhập. Hãy đăng nhập hoặc đăng ký bên dưới để tiếp tục.',
+    cloudSignedIn: 'Đã đăng nhập',
+    cloudUnknownAccount: 'Tài khoản không xác định',
+    cloudLogoutBtn: 'Đăng xuất',
+    cloudCardTitleLogin: 'Đăng nhập KiroaaS Cloud',
+    cloudCardTitleRegister: 'Tạo tài khoản KiroaaS Cloud',
+    cloudCardDesc: 'Đây là tài khoản riêng của KiroaaS, tách biệt với tài khoản Kiro của bạn. Chúng tôi dùng nó để nhận diện bạn và ngăn lạm dụng, giúp mọi người đều có quyền truy cập ổn định.',
+    cloudCardPricingNote: 'Miễn phí trong giai đoạn beta. Chúng tôi không thể đảm bảo sẽ tiếp tục miễn phí sau đó.',
+    cloudTabLogin: 'Đăng nhập',
+    cloudTabRegister: 'Đăng ký',
+    cloudFieldEmail: 'Email',
+    cloudFieldPassword: 'Mật khẩu',
+    cloudFieldConfirmPassword: 'Xác nhận mật khẩu',
+    cloudPasswordHint: 'Ít nhất 8 ký tự',
+    cloudPasswordMismatch: 'Mật khẩu không khớp',
+    cloudSubmitLogin: 'Đăng nhập',
+    cloudSubmitRegister: 'Đăng ký và đăng nhập',
+    cloudNoAccount: 'Chưa có tài khoản?',
+    cloudGoToRegister: 'Đăng ký ngay',
+    cloudHaveAccount: 'Đã có tài khoản?',
+    cloudGoToLogin: 'Đăng nhập ngay',
+    cloudStatusConnected: 'Đã kết nối tới KiroaaS Cloud',
+    cloudStatusChecking: 'Đang kiểm tra kết nối…',
+    cloudStatusUnreachable: 'Không thể kết nối tới KiroaaS Cloud',
+    cloudStatusExpired: 'Phiên đã hết hạn, vui lòng đăng nhập lại',
   },
 };
 

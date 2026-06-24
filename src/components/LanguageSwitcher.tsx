@@ -24,6 +24,7 @@ const LANGUAGE_LABELS: Record<Language, string> = {
   pt: 'Português (Brasil)',
   ja: '日本語',
   ko: '한국어',
+  vi: 'Tiếng Việt',
 };
 
 export function LanguageSwitcher({ variant = 'default' }: LanguageSwitcherProps) {
@@ -45,6 +46,7 @@ export function LanguageSwitcher({ variant = 'default' }: LanguageSwitcherProps)
           <SelectItem value="pt">Português (Brasil)</SelectItem>
           <SelectItem value="ja">日本語</SelectItem>
           <SelectItem value="ko">한국어</SelectItem>
+          <SelectItem value="vi">Tiếng Việt</SelectItem>
         </SelectContent>
       </Select>
     );
@@ -66,6 +68,7 @@ export function LanguageSwitcher({ variant = 'default' }: LanguageSwitcherProps)
           <SelectItem value="pt">Português (Brasil)</SelectItem>
           <SelectItem value="ja">日本語</SelectItem>
           <SelectItem value="ko">한국어</SelectItem>
+          <SelectItem value="vi">Tiếng Việt</SelectItem>
         </SelectContent>
       </Select>
     </div>

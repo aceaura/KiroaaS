@@ -21,7 +21,8 @@ function isSupportedLanguage(value: string | null): value is Language {
     value === 'id' ||
     value === 'pt' ||
     value === 'ja' ||
-    value === 'ko'
+    value === 'ko' ||
+    value === 'vi'
   );
 }
 
@@ -44,6 +45,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       if (primary === 'pt') return 'pt';
       if (primary === 'ja') return 'ja';
       if (primary === 'ko') return 'ko';
+      if (primary === 'vi') return 'vi';
     }
     return 'en';
   });
