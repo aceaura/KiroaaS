@@ -59,6 +59,7 @@ from extensions.profile_arn_autofetch import install_profile_arn_autofetch
 from extensions.control_plane_host import install_control_plane_host_redirect
 from extensions.chat_host_fallback import install_chat_host_fallback
 from extensions.model_id_format import install_model_id_format
+from extensions.billing_header_strip import install_billing_header_strip
 
 
 # Mount extension routers on the upstream app. (tool-name aliasing and
@@ -69,6 +70,10 @@ install_cloud_connector()
 install_profile_arn_autofetch()
 install_control_plane_host_redirect()
 install_chat_host_fallback()
+# Strip Claude Code's per-request billing-attribution line from the system
+# prompt before forwarding to Kiro, so it doesn't poison upstream prompt-cache
+# prefixes. Wraps extract_system_prompt() at runtime (order-insensitive).
+install_billing_header_strip()
 # Dash-format Claude model IDs on /v1/models for Claude-family clients. Added as
 # a response middleware (Starlette builds the stack lazily at startup, so adding
 # it post-import still takes effect) rather than wrapping the already-registered
