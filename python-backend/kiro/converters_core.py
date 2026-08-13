@@ -110,6 +110,29 @@ class UnifiedMessage:
     images: Optional[List[Dict[str, Any]]] = None
 
 
+LEGACY_PLACEHOLDER_CONTENT = {
+    "(empty placeholder)",
+    "(empty plan placeholder)",
+}
+PLACEHOLDER_CONTENT = "继续执行"
+
+
+def normalize_placeholder_messages(messages: List[UnifiedMessage]) -> List[UnifiedMessage]:
+    normalized = []
+    for message in messages:
+        if isinstance(message.content, str) and message.content in LEGACY_PLACEHOLDER_CONTENT:
+            normalized.append(UnifiedMessage(
+                role=message.role,
+                content=PLACEHOLDER_CONTENT,
+                tool_calls=message.tool_calls,
+                tool_results=message.tool_results,
+                images=message.images,
+            ))
+        else:
+            normalized.append(message)
+    return normalized
+
+
 @dataclass
 class UnifiedTool:
     """
@@ -962,7 +985,7 @@ def strip_all_tool_content(messages: List[UnifiedMessage]) -> Tuple[List[Unified
                     content_parts.append(result_text)
             
             # Join all parts with double newline
-            content = "\n\n".join(content_parts) if content_parts else "(empty placeholder)"
+            content = "\n\n".join(content_parts) if content_parts else "继续执行"
             
             # Create a copy of the message without tool content but with text representation
             # IMPORTANT: Preserve images from the original message (e.g., screenshots from MCP tools)
@@ -1176,7 +1199,7 @@ def ensure_first_message_is_user(messages: List[UnifiedMessage]) -> List[Unified
         >>> result[0].role
         'user'
         >>> result[0].content
-        '(empty placeholder)'
+        '继续执行'
     """
     if not messages:
         return messages
@@ -1187,10 +1210,10 @@ def ensure_first_message_is_user(messages: List[UnifiedMessage]) -> List[Unified
             f"(Kiro API requires conversations to start with user)"
         )
         # Create minimal synthetic user message (matches LiteLLM behavior)
-        # Using "(empty placeholder)" as minimal valid content to avoid disrupting conversation context
+        # Using "继续执行" as minimal valid content to avoid disrupting conversation context
         synthetic_user = UnifiedMessage(
             role="user",
-            content="(empty placeholder)"
+            content="继续执行"
         )
         
         return [synthetic_user] + messages
@@ -1259,7 +1282,7 @@ def ensure_alternating_roles(messages: List[UnifiedMessage]) -> List[UnifiedMess
     
     Kiro API requires alternating userInputMessage and assistantResponseMessage.
     When consecutive user messages are detected, synthetic assistant messages
-    with "(empty placeholder)" placeholder are inserted between them to maintain alternation.
+    with "继续执行" placeholder are inserted between them to maintain alternation.
     
     This fixes multiple unknown roles (converted to user)
     create consecutive userInputMessage entries that violate Kiro API requirements.
@@ -1282,7 +1305,7 @@ def ensure_alternating_roles(messages: List[UnifiedMessage]) -> List[UnifiedMess
         >>> result[1].role
         'assistant'
         >>> result[1].content
-        '(empty placeholder)'
+        '继续执行'
     """
     if not messages or len(messages) < 2:
         return messages
@@ -1297,7 +1320,7 @@ def ensure_alternating_roles(messages: List[UnifiedMessage]) -> List[UnifiedMess
         if msg.role == "user" and prev_role == "user":
             synthetic_assistant = UnifiedMessage(
                 role="assistant",
-                content="(empty placeholder)"  # Consistent with build_kiro_history() placeholder
+                content="继续执行"  # Consistent with build_kiro_history() placeholder
             )
             result.append(synthetic_assistant)
             synthetic_count += 1
@@ -1339,7 +1362,7 @@ def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Di
             
             # Fallback for empty content - Kiro API requires non-empty content
             if not content:
-                content = "(empty placeholder)"
+                content = "继续执行"
             
             user_input = {
                 "content": content,
@@ -1381,7 +1404,7 @@ def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Di
             
             # Fallback for empty content - Kiro API requires non-empty content
             if not content:
-                content = "(empty placeholder)"
+                content = "继续执行"
             
             assistant_response = {"content": content}
             
@@ -1429,6 +1452,8 @@ def build_kiro_payload(
     Raises:
         ValueError: If there are no messages to send
     """
+    messages = normalize_placeholder_messages(messages)
+
     # Process tools with long descriptions
     processed_tools, tool_documentation = process_tools_with_long_descriptions(tools)
     
@@ -1530,11 +1555,11 @@ def build_kiro_payload(
                 "content": current_content
             }
         })
-        current_content = "(empty placeholder)"
+        current_content = "继续执行"
     
     # If content is empty - use placeholder
     if not current_content:
-        current_content = "(empty placeholder)"
+        current_content = "继续执行"
     
     # Process images in current message - extract from message or content
     # IMPORTANT: images go directly into userInputMessage, NOT into userInputMessageContext
