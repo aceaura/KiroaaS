@@ -2,7 +2,8 @@
 Extension routes: /usage and /account.
 
 Lives outside the upstream kiro/ tree so upstream can be sync'd without conflicts.
-Mounted by app_entry.py.
+Mounted by main.py, so the routes exist for every launch path (the Docker image
+runs `python main.py`; app_entry.py imports that same app object).
 """
 
 import json
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from extensions.control_plane_host import to_q_amazonaws_host
 from kiro.auth import KiroAuthManager
 from kiro.routes_openai import verify_api_key
 from kiro.utils import get_kiro_headers
@@ -46,9 +48,11 @@ async def get_usage(request: Request):
     headers["Content-Type"] = "application/x-amz-json-1.0"
 
     # GetUsageLimits lives on q.amazonaws.com; runtime.kiro.dev 400s with
-    # UnknownOperationException. q_host is redirected there by the
-    # control_plane_host extension.
-    url = auth_manager.q_host
+    # UnknownOperationException. Resolve the host here instead of relying on the
+    # control_plane_host redirect being installed — it is not when the gateway
+    # runs via main.py, and installing it would also flip model fetching from
+    # the static FALLBACK_MODELS list to dynamic.
+    url = to_q_amazonaws_host(auth_manager.q_host)
     body = {"origin": "AI_EDITOR", "isEmailRequired": True}
 
     try:
@@ -82,9 +86,9 @@ async def get_account(request: Request):
         headers["x-amz-target"] = "com.amazon.aws.codewhisperer.runtime.AmazonCodeWhispererService.GetUsageLimits"
         headers["Content-Type"] = "application/x-amz-json-1.0"
 
-        # GetUsageLimits lives on q.amazonaws.com (redirected q_host), not
-        # runtime.kiro.dev which only serves the chat operation.
-        url = auth_manager.q_host
+        # GetUsageLimits lives on q.amazonaws.com, not runtime.kiro.dev which
+        # only serves the chat operation. Same local host resolution as /usage.
+        url = to_q_amazonaws_host(auth_manager.q_host)
         body = {"origin": "AI_EDITOR", "isEmailRequired": True}
 
         logger.debug(f"Calling Kiro API with headers: {headers}")

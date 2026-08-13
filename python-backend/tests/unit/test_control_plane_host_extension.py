@@ -15,6 +15,7 @@ import kiro.account_manager as account_manager
 from kiro.auth import KiroAuthManager
 from extensions.control_plane_host import (
     install_control_plane_host_redirect,
+    to_q_amazonaws_host,
     uninstall_control_plane_host_redirect,
 )
 
@@ -29,6 +30,45 @@ def clean_redirect():
 
 def _manager(region="us-east-1"):
     return KiroAuthManager(refresh_token="rt", region=region)
+
+
+# =============================================================================
+# to_q_amazonaws_host — the pure resolver, usable without installing the redirect
+# =============================================================================
+
+def test_helper_rewrites_runtime_host():
+    assert (
+        to_q_amazonaws_host("https://runtime.us-east-1.kiro.dev")
+        == "https://q.us-east-1.amazonaws.com"
+    )
+
+
+def test_helper_preserves_region():
+    assert (
+        to_q_amazonaws_host("https://runtime.eu-west-1.kiro.dev")
+        == "https://q.eu-west-1.amazonaws.com"
+    )
+
+
+def test_helper_is_idempotent():
+    # Applying it to an already-redirected host must not rewrite it again.
+    once = to_q_amazonaws_host("https://runtime.us-east-1.kiro.dev")
+    assert to_q_amazonaws_host(once) == once
+
+
+def test_helper_passes_through_unknown_host():
+    assert to_q_amazonaws_host("https://example.invalid") == "https://example.invalid"
+
+
+def test_helper_accepts_trailing_slash():
+    assert (
+        to_q_amazonaws_host("https://runtime.us-east-1.kiro.dev/")
+        == "https://q.us-east-1.amazonaws.com"
+    )
+
+
+def test_helper_handles_empty_host():
+    assert to_q_amazonaws_host("") == ""
 
 
 def test_q_host_redirected_for_runtime():
