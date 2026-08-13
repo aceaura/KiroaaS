@@ -629,6 +629,55 @@ class TestGetModelIdForKiro:
         print(f"Comparing result: Expected 'claude-unknown-model' (pass-through), Got '{result}'")
         assert result == "claude-unknown-model"
 
+    def test_alias_resolved(self):
+        """
+        What it does: An alias is replaced by its target before normalization.
+        Goal: The routes never call ModelResolver.resolve(), so the converters' helper
+            must apply the alias table itself -- otherwise /v1/models advertises
+            "auto-kiro" while Kiro rejects it with 400.
+        """
+        print("Action: get_model_id_for_kiro('auto-kiro', {}, {'auto-kiro': 'auto'})...")
+        result = get_model_id_for_kiro("auto-kiro", {}, {"auto-kiro": "auto"})
+
+        print(f"Comparing result: Expected 'auto', Got '{result}'")
+        assert result == "auto"
+
+    def test_alias_to_hidden_model_chains(self):
+        """
+        What it does: An alias pointing at a hidden model resolves through both layers.
+        Goal: Check alias (Layer 0) runs before the hidden-model lookup (Layer 3).
+        """
+        hidden = {"claude-3.7-sonnet": "CLAUDE_3_7_SONNET_20250219_V1_0"}
+        aliases = {"my-legacy": "claude-3.7-sonnet"}
+
+        print("Action: get_model_id_for_kiro('my-legacy', hidden, aliases)...")
+        result = get_model_id_for_kiro("my-legacy", hidden, aliases)
+
+        print(f"Comparing result: Expected 'CLAUDE_3_7_SONNET_20250219_V1_0', Got '{result}'")
+        assert result == "CLAUDE_3_7_SONNET_20250219_V1_0"
+
+    def test_non_alias_unaffected(self):
+        """
+        What it does: A real model name is untouched when an alias table is present.
+        Goal: Check the alias layer only rewrites exact alias keys.
+        """
+        print("Action: get_model_id_for_kiro('claude-opus-5', {}, {'auto-kiro': 'auto'})...")
+        result = get_model_id_for_kiro("claude-opus-5", {}, {"auto-kiro": "auto"})
+
+        print(f"Comparing result: Expected 'claude-opus-5', Got '{result}'")
+        assert result == "claude-opus-5"
+
+    def test_aliases_omitted_keeps_old_behaviour(self):
+        """
+        What it does: Calling without the aliases argument behaves as before.
+        Goal: The parameter is optional; existing two-argument callers are unaffected.
+        """
+        print("Action: get_model_id_for_kiro('auto-kiro', {})...")
+        result = get_model_id_for_kiro("auto-kiro", {})
+
+        print(f"Comparing result: Expected 'auto-kiro' (no alias table), Got '{result}'")
+        assert result == "auto-kiro"
+
 
 # =============================================================================
 # TestModelResolver - Tests for ModelResolver class

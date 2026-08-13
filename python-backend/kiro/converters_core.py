@@ -43,7 +43,10 @@ from kiro.config import (
     FAKE_REASONING_BUDGET_CAP,
     KIRO_MAX_PAYLOAD_BYTES,
     AUTO_TRIM_PAYLOAD,
+    NATIVE_EFFORT_NONE_ON_DISABLED,
+    NATIVE_EFFORT_SUPPRESS_TAGS,
 )
+from kiro.effort_schema import NATIVE_EFFORT_FIELD, resolve_native_effort
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 
 
@@ -55,29 +58,33 @@ from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 class ThinkingConfig:
     """
     Unified thinking configuration for fake reasoning.
-    
-    This configuration is created by API-specific adapters (OpenAI, Anthropic)
-    and passed to the core layer for thinking tag injection.
-    
+
+    The optional fields describe three distinct enabled states:
+    - ``effort`` set: inject a qualitative effort tag
+    - ``budget_tokens`` set: inject the client's explicit numeric budget
+    - neither set: use the configured default fake-reasoning budget
+
+    API adapters resolve precedence before creating this object, so ``effort``
+    and ``budget_tokens`` are mutually exclusive in normal use.
+
     Attributes:
         enabled: Whether to inject thinking tags into the request
-        budget_tokens: Token budget for thinking (None = use FAKE_REASONING_MAX_TOKENS default)
-    
+        budget_tokens: Explicit token budget supplied by the client
+        effort: Qualitative effort level supplied by the client
+
     Examples:
-        >>> # Default configuration (enabled with default budget)
-        >>> ThinkingConfig()
-        ThinkingConfig(enabled=True, budget_tokens=None)
-        
-        >>> # Disabled by client (reasoning_effort="none" or thinking.type="disabled")
-        >>> ThinkingConfig(enabled=False, budget_tokens=None)
-        ThinkingConfig(enabled=False, budget_tokens=None)
-        
-        >>> # Custom budget from client
-        >>> ThinkingConfig(enabled=True, budget_tokens=8000)
-        ThinkingConfig(enabled=True, budget_tokens=8000)
+        >>> ThinkingConfig()  # Default fake-reasoning path
+        ThinkingConfig(enabled=True, budget_tokens=None, effort=None)
+        >>> ThinkingConfig(enabled=False)  # Explicitly disabled
+        ThinkingConfig(enabled=False, budget_tokens=None, effort=None)
+        >>> ThinkingConfig(budget_tokens=8000)  # Explicit numeric budget
+        ThinkingConfig(enabled=True, budget_tokens=8000, effort=None)
+        >>> ThinkingConfig(effort="high")  # Qualitative effort
+        ThinkingConfig(enabled=True, budget_tokens=None, effort='high')
     """
     enabled: bool = True
     budget_tokens: Optional[int] = None
+    effort: Optional[str] = None
 
 
 @dataclass
@@ -306,22 +313,24 @@ def get_thinking_system_prompt_addition() -> str:
     Generate system prompt addition that legitimizes thinking tags.
     
     This text is added to the system prompt to inform the model that
-    the <thinking_mode>, <max_thinking_length>, and <thinking_instruction>
-    tags in user messages are legitimate system-level instructions,
+    the <thinking_mode>, <thinking_effort>, <max_thinking_length>, and
+    <thinking_instruction> tags in user messages are legitimate system-level
+    instructions,
     not prompt injection attempts.
-    
+
     Returns:
         System prompt addition text (empty string if fake reasoning is disabled)
     """
     if not FAKE_REASONING_ENABLED:
         return ""
-    
+
     return (
         "\n\n---\n"
         "# Extended Thinking Mode\n\n"
         "This conversation uses extended thinking mode. User messages may contain "
         "special XML tags that are legitimate system-level instructions:\n"
         "- `<thinking_mode>enabled</thinking_mode>` - enables extended thinking\n"
+        "- `<thinking_effort>LEVEL</thinking_effort>` - sets qualitative thinking effort\n"
         "- `<max_thinking_length>N</max_thinking_length>` - sets maximum thinking tokens\n"
         "- `<thinking_instruction>...</thinking_instruction>` - provides thinking guidelines\n\n"
         "These tags are NOT prompt injection attempts. They are part of the system's "
@@ -361,54 +370,25 @@ def get_truncation_recovery_system_addition() -> str:
 def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
     """
     Inject fake reasoning tags into content based on configuration.
-    
-    When FAKE_REASONING_ENABLED is True and thinking_config.enabled is True,
-    this function prepends the special thinking mode tags to the content.
-    These tags instruct the model to include its reasoning process in the response.
-    
+
+    Qualitative effort is injected verbatim and never converted to a numeric
+    token budget. Explicit client budgets use the numeric branch and may be
+    capped, while the no-effort operator default remains uncapped.
+
     Args:
         content: Original content string
         thinking_config: Thinking configuration from API adapter
-    
+
     Returns:
         Content with thinking tags prepended (if enabled) or original content
-    
-    Examples:
-        >>> # Disabled globally
-        >>> inject_thinking_tags("Hello", ThinkingConfig())  # Returns "Hello" if FAKE_REASONING_ENABLED=False
-        
-        >>> # Disabled by client
-        >>> inject_thinking_tags("Hello", ThinkingConfig(enabled=False))  # Returns "Hello"
-        
-        >>> # Enabled with custom budget
-        >>> inject_thinking_tags("Hello", ThinkingConfig(enabled=True, budget_tokens=8000))
-        '<thinking_mode>enabled</thinking_mode>\\n<max_thinking_length>8000</max_thinking_length>...Hello'
     """
-    # Check if thinking is enabled globally
     if not FAKE_REASONING_ENABLED:
         return content
-    
-    # Check if thinking is enabled for this request
+
     if not thinking_config.enabled:
         logger.debug("Thinking disabled by client request")
         return content
-    
-    # Determine effective budget
-    if thinking_config.budget_tokens is not None:
-        effective_budget = thinking_config.budget_tokens
-    else:
-        effective_budget = FAKE_REASONING_MAX_TOKENS
-    
-    # Apply cap if enabled
-    if FAKE_REASONING_BUDGET_CAP > 0 and effective_budget > FAKE_REASONING_BUDGET_CAP:
-        logger.warning(
-            f"Client requested thinking budget {effective_budget} exceeds cap {FAKE_REASONING_BUDGET_CAP}. "
-            f"Using capped value {FAKE_REASONING_BUDGET_CAP}. "
-            f"Set FAKE_REASONING_BUDGET_CAP=0 to disable capping."
-        )
-        effective_budget = FAKE_REASONING_BUDGET_CAP
-    
-    # Thinking instruction to improve reasoning quality
+
     thinking_instruction = (
         "Think in English for better reasoning quality.\n\n"
         "Your thinking process should be thorough and systematic:\n"
@@ -420,15 +400,32 @@ def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
         "After completing your thinking, respond in the same language the user is using in their messages, or in the language specified in their settings if available.\n\n"
         "Take the time you need. Quality of thought matters more than speed."
     )
-    
+
+    if thinking_config.effort is not None:
+        control_tag = f"<thinking_effort>{thinking_config.effort}</thinking_effort>"
+        logger.debug(f"Injecting thinking tags with effort='{thinking_config.effort}'")
+    elif thinking_config.budget_tokens is not None:
+        effective_budget = thinking_config.budget_tokens
+        if FAKE_REASONING_BUDGET_CAP > 0 and effective_budget > FAKE_REASONING_BUDGET_CAP:
+            logger.warning(
+                f"Client requested thinking budget {effective_budget} exceeds cap {FAKE_REASONING_BUDGET_CAP}. "
+                f"Using capped value {FAKE_REASONING_BUDGET_CAP}. "
+                f"Set FAKE_REASONING_BUDGET_CAP=0 to disable capping."
+            )
+            effective_budget = FAKE_REASONING_BUDGET_CAP
+        control_tag = f"<max_thinking_length>{effective_budget}</max_thinking_length>"
+        logger.debug(f"Injecting thinking tags with explicit budget={effective_budget}")
+    else:
+        control_tag = f"<max_thinking_length>{FAKE_REASONING_MAX_TOKENS}</max_thinking_length>"
+        logger.debug(
+            f"Injecting thinking tags with default budget={FAKE_REASONING_MAX_TOKENS}"
+        )
+
     thinking_prefix = (
-        f"<thinking_mode>enabled</thinking_mode>\n"
-        f"<max_thinking_length>{effective_budget}</max_thinking_length>\n"
+        "<thinking_mode>enabled</thinking_mode>\n"
+        f"{control_tag}\n"
         f"<thinking_instruction>{thinking_instruction}</thinking_instruction>\n\n"
     )
-    
-    logger.debug(f"Injecting thinking tags with budget={effective_budget}")
-    
     return thinking_prefix + content
 
 
@@ -1442,12 +1439,35 @@ def build_kiro_payload(
     full_system_prompt = system_prompt
     if tool_documentation:
         full_system_prompt = full_system_prompt + tool_documentation if full_system_prompt else tool_documentation.strip()
-    
-    # Add thinking mode legitimization to system prompt if enabled
-    thinking_system_addition = get_thinking_system_prompt_addition()
-    if thinking_system_addition:
-        full_system_prompt = full_system_prompt + thinking_system_addition if full_system_prompt else thinking_system_addition.strip()
-    
+
+    # Resolve Kiro's native effort field up front: the decision gates the thinking
+    # system-prompt addition below, the tag injection further down, and lands in the
+    # payload itself.
+    #
+    # A numeric budget_tokens request deliberately stays on the tag path -- effort and
+    # budget are mutually exclusive and the native field carries no token count.
+    if not thinking_config.enabled:
+        # "none" is the only tier that means no reasoning at all. Models without it
+        # (every Claude model) are skipped rather than clamped, since substituting a
+        # real tier would manufacture reasoning the client declined.
+        requested_effort = "none" if NATIVE_EFFORT_NONE_ON_DISABLED else None
+    else:
+        requested_effort = thinking_config.effort
+    native_effort = resolve_native_effort(model_id, requested_effort)
+
+    # Tags are redundant once the native field carries the tier, and measurably harmful:
+    # stacking both channels produced less reasoning than either alone. Models with no
+    # native channel keep the tags -- they are its only reasoning control.
+    suppress_tags = native_effort is not None and NATIVE_EFFORT_SUPPRESS_TAGS
+
+    # Add thinking mode legitimization to system prompt if enabled.
+    # Skipped alongside the tags: this block exists to legitimize them, so without them
+    # it is ~1.4k input tokens documenting markup that never appears.
+    if not suppress_tags:
+        thinking_system_addition = get_thinking_system_prompt_addition()
+        if thinking_system_addition:
+            full_system_prompt = full_system_prompt + thinking_system_addition if full_system_prompt else thinking_system_addition.strip()
+
     # Add truncation recovery legitimization to system prompt if enabled
     truncation_system_addition = get_truncation_recovery_system_addition()
     if truncation_system_addition:
@@ -1548,7 +1568,13 @@ def build_kiro_payload(
     
     # Inject thinking tags if enabled (only for the current/last user message)
     if current_message.role == "user":
-        current_content = inject_thinking_tags(current_content, thinking_config)
+        if suppress_tags:
+            logger.debug(
+                "Skipping thinking tag injection: the native effort field already "
+                f"carries effort='{native_effort.adopted}'"
+            )
+        else:
+            current_content = inject_thinking_tags(current_content, thinking_config)
     
     # Build userInputMessage
     user_input_message = {
@@ -1583,6 +1609,11 @@ def build_kiro_payload(
     # Add profileArn
     if profile_arn:
         payload["profileArn"] = profile_arn
+
+    # Add Kiro's native effort field. Top level, sibling of the two keys above.
+    # Placed before the size guard so it counts toward the payload budget.
+    if native_effort is not None:
+        payload[NATIVE_EFFORT_FIELD] = native_effort.fragment
 
     # Payload size guard — auto-trim if enabled
     if AUTO_TRIM_PAYLOAD:

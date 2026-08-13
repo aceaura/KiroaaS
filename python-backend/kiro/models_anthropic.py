@@ -183,11 +183,14 @@ class AnthropicMessage(BaseModel):
     Message in Anthropic format.
 
     Attributes:
-        role: Message role (user or assistant)
+        role: Message role. "system"/"developer" are accepted because Claude Code
+            injects its memory/context as messages[i].role="system"; they are folded
+            to "user" by normalize_message_roles in converters_core before reaching
+            Kiro (which only supports user/assistant in history).
         content: Message content (string or list of content blocks)
     """
 
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "system", "developer"]
     content: Union[str, List[ContentBlock]]
 
     model_config = {"extra": "allow"}
@@ -294,6 +297,24 @@ class SystemContentBlock(BaseModel):
 SystemPrompt = Union[str, List[SystemContentBlock], List[Dict[str, Any]]]
 
 
+class AnthropicOutputConfig(BaseModel):
+    """
+    Anthropic output_config object.
+
+    Claude Code carries its reasoning effort level here, alongside the
+    official `thinking` parameter. The effort value is a free-form string
+    rather than a Literal so that unknown levels reach the converter, which
+    warns and falls back instead of rejecting the request with a 422.
+
+    Attributes:
+        effort: Reasoning effort level sent by the client (e.g. "low", "max")
+    """
+
+    effort: Optional[str] = None
+
+    model_config = {"extra": "allow"}  # Forward compatibility
+
+
 class AnthropicMessagesRequest(BaseModel):
     """
     Request to Anthropic Messages API (/v1/messages).
@@ -323,6 +344,13 @@ class AnthropicMessagesRequest(BaseModel):
 
     # Extended thinking (official Anthropic parameter)
     thinking: Optional[Dict[str, Any]] = None
+
+    # Reasoning effort (Claude Code / OpenAI-compatible clients).
+    # Declared as a plain str, not a Literal: unknown levels must reach the
+    # converter so it can warn and fall back to the default budget instead of
+    # failing validation with a 422.
+    output_config: Optional[AnthropicOutputConfig] = None
+    reasoning_effort: Optional[str] = None
 
     # Tools
     tools: Optional[List[AnthropicTool]] = None

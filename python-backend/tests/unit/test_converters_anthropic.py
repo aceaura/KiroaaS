@@ -30,6 +30,7 @@ from kiro.converters_core import UnifiedMessage, UnifiedTool
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
     AnthropicMessage,
+    AnthropicOutputConfig,
     AnthropicTool,
     TextContentBlock,
     ToolUseContentBlock,
@@ -1852,7 +1853,84 @@ class TestExtractThinkingConfigFromAnthropic:
         print(f"Comparing: enabled={config.enabled}, budget_tokens={config.budget_tokens}")
         assert config.enabled is True
         assert config.budget_tokens is None
-    
+
+    def test_output_config_effort_verbatim(self):
+        """
+        What it does: Verifies output_config.effort 5 tiers are preserved verbatim
+        Purpose: cc clients send the 5 effort tiers here
+        """
+        for tier in ("low", "medium", "high", "xhigh", "max"):
+            request = AnthropicMessagesRequest(
+                model="claude-sonnet-4.5",
+                messages=[AnthropicMessage(role="user", content="test")],
+                max_tokens=1024,
+                output_config=AnthropicOutputConfig(effort=tier)
+            )
+            config = extract_thinking_config_from_anthropic(request)
+            assert config.enabled is True
+            assert config.effort == tier
+
+    def test_output_config_effort_unknown_falls_back_to_medium(self):
+        """
+        What it does: Verifies output_config.effort outside 5 tiers falls back to medium
+        Purpose: minimal/none/bogus all become medium
+        """
+        for tier in ("minimal", "none", "bogus"):
+            request = AnthropicMessagesRequest(
+                model="claude-sonnet-4.5",
+                messages=[AnthropicMessage(role="user", content="test")],
+                max_tokens=1024,
+                output_config=AnthropicOutputConfig(effort=tier)
+            )
+            config = extract_thinking_config_from_anthropic(request)
+            assert config.effort == "medium"
+
+    def test_reasoning_effort_none_falls_back_to_medium(self):
+        """
+        What it does: Verifies reasoning_effort="none" falls back to medium
+        Purpose: none is outside the cc 5-tier vocabulary; disabled is via thinking.type
+        """
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            reasoning_effort="none"
+        )
+        config = extract_thinking_config_from_anthropic(request)
+        assert config.enabled is True
+        assert config.effort == "medium"
+
+    def test_disabled_priority_over_effort(self):
+        """
+        What it does: Verifies thinking.type=disabled wins over output_config.effort
+        Purpose: explicit disable is the one true disabled channel
+        """
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "disabled"},
+            output_config=AnthropicOutputConfig(effort="medium")
+        )
+        config = extract_thinking_config_from_anthropic(request)
+        assert config.enabled is False
+
+    def test_budget_priority_over_effort(self):
+        """
+        What it does: Verifies thinking.budget_tokens wins over output_config.effort
+        Purpose: explicit numeric budget outranks the qualitative effort tier
+        """
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "enabled", "budget_tokens": 8000},
+            output_config=AnthropicOutputConfig(effort="medium")
+        )
+        config = extract_thinking_config_from_anthropic(request)
+        assert config.budget_tokens == 8000
+        assert config.effort is None
+
 
 
 class TestAnthropicToKiroIntegration:

@@ -1753,7 +1753,43 @@ class TestThinkingParameter:
             max_tokens=1024,
             thinking={"type": "disabled"}
         )
-        
+
         print(f"Comparing thinking: got={request.thinking}")
         assert request.thinking is not None
         assert request.thinking["type"] == "disabled"
+
+
+class TestAnthropicMessageRoles:
+    """Tests for extended message roles (Claude Code injects role="system")."""
+
+    def test_system_role_accepted(self):
+        """
+        What it does: Verifies role="system" passes Pydantic validation
+        Purpose: Claude Code injects its memory as messages[i].role="system";
+            the gateway accepts it here and folds it to "user" via
+            normalize_message_roles before sending to Kiro.
+        """
+        print("Creating AnthropicMessage with role='system'...")
+        message = AnthropicMessage(
+            role="system",
+            content=[{"type": "text", "text": "<system-reminder>context</system-reminder>"}]
+        )
+        assert message.role == "system"
+
+    def test_developer_role_accepted(self):
+        """
+        What it does: Verifies role="developer" passes Pydantic validation
+        Purpose: Same folding path as system; Kiro only supports user/assistant.
+        """
+        print("Creating AnthropicMessage with role='developer'...")
+        message = AnthropicMessage(role="developer", content="context")
+        assert message.role == "developer"
+
+    def test_user_assistant_still_accepted(self):
+        """
+        What it does: Verifies the original user/assistant roles still validate
+        Purpose: Ensure the Literal widening didn't break existing behaviour.
+        """
+        for role in ("user", "assistant"):
+            message = AnthropicMessage(role=role, content="test")
+            assert message.role == role

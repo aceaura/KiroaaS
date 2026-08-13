@@ -1095,22 +1095,20 @@ class TestReasoningEffort:
         print(f"Comparing: expected=None, got={request.reasoning_effort}")
         assert request.reasoning_effort is None
     
-    def test_reasoning_effort_invalid_value_rejected(self):
+    def test_reasoning_effort_unknown_value_accepted_freeform(self):
         """
-        What it does: Verifies invalid reasoning_effort value is rejected by Pydantic
-        Purpose: Ensure type safety for reasoning_effort parameter
+        What it does: Verifies unknown reasoning_effort values are accepted as strings
+        Purpose: reasoning_effort is a free-form str so unknown tiers reach the
+            converter, which falls back to EFFORT_FALLBACK ("medium") instead of
+            Pydantic rejecting the request with a 422.
         """
-        print("Attempting to create ChatCompletionRequest with invalid reasoning_effort...")
-        
-        from pydantic import ValidationError
-        try:
-            request = ChatCompletionRequest(
-                model="claude-sonnet-4.5",
-                messages=[ChatMessage(role="user", content="test")],
-                reasoning_effort="ultra"  # Invalid value
-            )
-            print("ERROR: Should have raised ValidationError!")
-            assert False, "Expected ValidationError for invalid reasoning_effort"
-        except ValidationError as e:
-            print(f"Correctly raised ValidationError: {e}")
-            assert "reasoning_effort" in str(e).lower()
+        print("Creating ChatCompletionRequest with unknown reasoning_effort...")
+
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4.5",
+            messages=[ChatMessage(role="user", content="test")],
+            reasoning_effort="ultra"  # Unknown tier: accepted here, converter falls back
+        )
+
+        print(f"Comparing: expected='ultra', got='{request.reasoning_effort}'")
+        assert request.reasoning_effort == "ultra"

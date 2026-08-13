@@ -27,7 +27,7 @@ Loads environment variables and provides typed access to them.
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -282,6 +282,16 @@ FALLBACK_MODELS: List[Dict[str, str]] = [
     {"modelId": "claude-opus-4.5"},
     {"modelId": "claude-opus-4.6"},
     {"modelId": "claude-opus-4.7"},
+    # Models below are absent from upstream kiro-gateway's list but verified
+    # working against runtime.kiro.dev on 2026-08-13 (probed with a live request;
+    # unavailable IDs return 400 "Invalid model ID or insufficient subscription").
+    {"modelId": "claude-opus-4.8"},
+    {"modelId": "claude-opus-5"},
+    {"modelId": "claude-sonnet-5"},
+    {"modelId": "gpt-5.5"},
+    {"modelId": "gpt-5.6-sol"},
+    {"modelId": "gpt-5.6-terra"},
+    {"modelId": "gpt-5.6-luna"},
     {"modelId": "deepseek-3.2"},
     {"modelId": "glm-5"},
     {"modelId": "minimax-m2.1"},
@@ -476,6 +486,108 @@ FAKE_REASONING_OPEN_TAGS: List[str] = ["<thinking>", "<think>", "<reasoning>", "
 # Lower values = faster first token, but may miss tags with leading whitespace.
 # Default: 30 characters (enough for longest tag + some whitespace)
 FAKE_REASONING_INITIAL_BUFFER_SIZE: int = int(os.getenv("FAKE_REASONING_INITIAL_BUFFER_SIZE", "20"))
+
+
+# ==================================================================================================
+# Native Effort Schema (additionalModelRequestFields)
+# ==================================================================================================
+
+# Kiro accepts a real, server-validated effort field at the top level of the request,
+# alongside conversationState / profileArn:
+#
+#   {"additionalModelRequestFields": {"output_config": {"effort": "max"}}}
+#
+# Outer key is camelCase, inner keys are snake_case.
+#
+# model_id -> (schema path, allowed enum)
+#
+# ABSENT FROM THIS TABLE = NO NATIVE CHANNEL = THE FIELD MUST NOT BE SENT.
+# Five models reject it with 400 "additionalModelRequestFields is not supported for
+# this model": claude-haiku-4.5, deepseek-3.2, glm-5, minimax-m2.5, qwen3-coder-next.
+# Two more (auto, minimax-m2.1) accept arbitrary values with no validation at all, so
+# their real behaviour is unknown and they are treated conservatively as no-channel.
+#
+# The schema path is per-family and the server enforces it: sending "reasoning" to a
+# Claude model, or "output_config" to a GPT model, is an immediate 400
+# REQUEST_BODY_INVALID -- not a silent downgrade. Do NOT derive the family with
+# extract_model_family() (model_resolver.py): its regex only matches haiku|sonnet|opus,
+# so claude-fable-5 and every GPT model return None.
+#
+# Enums are NOT uniform within a family -- claude-sonnet-4.6 has no "xhigh" while the
+# Claude 5 models do -- so entries are recorded per model and never inferred by family.
+# No model accepts "minimal"; only the GPT models accept "none".
+#
+# Evidence: measured against runtime.us-east-1.kiro.dev at zero credit cost. The server
+# validates this field BEFORE invoking the model, so probing with an invalid sentinel
+# stops at the validation layer -- no tokens generated, no credits metered -- while the
+# 400 body returns the allowed enum verbatim. The runtime endpoint does not serve
+# ListAvailableModels, so this table cannot be refreshed at runtime and must be
+# maintained by hand.
+MODEL_EFFORT_SCHEMA: Dict[str, Tuple[str, Tuple[str, ...]]] = {
+    "claude-opus-5": ("output_config", ("low", "medium", "high", "xhigh", "max")),
+    "claude-sonnet-5": ("output_config", ("low", "medium", "high", "xhigh", "max")),
+    "claude-opus-4.8": ("output_config", ("low", "medium", "high", "xhigh", "max")),
+    # No "xhigh" on this one. Verified individually, not inferred from the family.
+    "claude-sonnet-4.6": ("output_config", ("low", "medium", "high", "max")),
+    # Probed 2026-08-13: reasoning is the correct channel (sending output_config returns
+    # 400 "property 'output_config' is not defined in the schema"), and all six values
+    # below are accepted.
+    "gpt-5.5": ("reasoning", ("none", "low", "medium", "high", "xhigh", "max")),
+    "gpt-5.6-sol": ("reasoning", ("none", "low", "medium", "high", "xhigh", "max")),
+    "gpt-5.6-terra": ("reasoning", ("none", "low", "medium", "high", "xhigh", "max")),
+    "gpt-5.6-luna": ("reasoning", ("none", "low", "medium", "high", "xhigh", "max")),
+}
+
+# The single effort vocabulary cc clients send: low/medium/high/xhigh/max. This is the
+# total order over those five tiers, lowest first, used to clamp a requested tier down
+# to the nearest tier the target model actually accepts (e.g. claude-sonnet-4.6 has no
+# "xhigh"). Membership in this tuple says nothing about whether a given model accepts a
+# tier -- that is MODEL_EFFORT_SCHEMA.
+#
+# Any effort value outside this five-tier vocabulary (OpenAI's "minimal"/"none", typos,
+# etc.) is not ordered here and is handled by the converters as EFFORT_FALLBACK.
+EFFORT_ORDER: Tuple[str, ...] = (
+    "low", "medium", "high", "xhigh", "max",
+)
+
+# Fallback tier for any effort value outside the cc five-tier vocabulary. Every model in
+# MODEL_EFFORT_SCHEMA accepts "medium", so this is always a safe default.
+EFFORT_FALLBACK: str = "medium"
+
+# Master switch for the native effort field. When disabled the gateway reverts
+# completely to its previous behaviour: the tier lands only in the injected prompt
+# tags and no additionalModelRequestFields is ever sent.
+#
+# Default: true (enabled)
+_NATIVE_EFFORT_RAW: str = os.getenv("NATIVE_EFFORT", "").lower()
+NATIVE_EFFORT_ENABLED: bool = _NATIVE_EFFORT_RAW not in ("false", "0", "no", "disabled", "off")
+
+# Skip the prompt-tag injection when the native field already carries the tier.
+#
+# Disabling this yields "both" mode -- native field AND tags in the same request --
+# which measured worst of the three: on claude-opus-5 at the low tier it produced zero
+# reasoning plaintext and no signature frames at all, i.e. stacking the two channels
+# suppressed the reasoning the native field alone delivers.
+#
+# Default: true (suppress tags when the native field is sent)
+_NATIVE_EFFORT_SUPPRESS_TAGS_RAW: str = os.getenv("NATIVE_EFFORT_SUPPRESS_TAGS", "").lower()
+NATIVE_EFFORT_SUPPRESS_TAGS: bool = _NATIVE_EFFORT_SUPPRESS_TAGS_RAW not in (
+    "false", "0", "no", "disabled", "off"
+)
+
+# Send effort=none when the client explicitly disables thinking, for models whose enum
+# includes "none" (the GPT models only -- Claude has no "none" tier and is skipped).
+#
+# This makes "disabled" mean what it says. Without it GPT keeps reasoning at the server
+# default even when the client asked for no thinking at all. Note the user-visible
+# consequence: the same request answers less thoroughly than before, because previously
+# GPT was reasoning regardless. It also costs fewer credits.
+#
+# Default: true
+_NATIVE_EFFORT_NONE_ON_DISABLED_RAW: str = os.getenv("NATIVE_EFFORT_NONE_ON_DISABLED", "").lower()
+NATIVE_EFFORT_NONE_ON_DISABLED: bool = _NATIVE_EFFORT_NONE_ON_DISABLED_RAW not in (
+    "false", "0", "no", "disabled", "off"
+)
 
 
 # ==================================================================================================

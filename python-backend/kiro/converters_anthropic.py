@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from kiro.config import HIDDEN_MODELS
+from kiro.config import EFFORT_FALLBACK, EFFORT_ORDER, HIDDEN_MODELS, MODEL_ALIASES
 from kiro.model_resolver import get_model_id_for_kiro
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
@@ -370,60 +370,85 @@ def convert_anthropic_tools(
     return unified_tools if unified_tools else None
 
 
-def extract_thinking_config_from_anthropic(request: AnthropicMessagesRequest) -> ThinkingConfig:
+def _normalize_effort(value: Any) -> Optional[str]:
     """
-    Extract thinking configuration from Anthropic request.
-    
-    Handles thinking parameter:
-    - {"type": "enabled", "budget_tokens": N} → enabled with budget
-    - {"type": "disabled"} → disabled
-    - None → enabled with default budget
-    
+    Normalize a client-supplied effort value for table lookup.
+
+    Anything that is not a non-empty string is treated as "not supplied" so
+    that the caller moves on to the next priority level instead of warning
+    about a value the client never really sent.
+
     Args:
-        request: Anthropic MessagesRequest
-    
+        value: Raw value from the request, of any type
+
     Returns:
-        ThinkingConfig for core layer
-    
-    Examples:
-        >>> # No thinking specified → use defaults
-        >>> request = AnthropicMessagesRequest(model="claude-sonnet-4.5", messages=[...], max_tokens=4096)
-        >>> extract_thinking_config_from_anthropic(request)
-        ThinkingConfig(enabled=True, budget_tokens=None)
-        
-        >>> # Explicitly disabled
-        >>> request.thinking = {"type": "disabled"}
-        >>> extract_thinking_config_from_anthropic(request)
-        ThinkingConfig(enabled=False, budget_tokens=None)
-        
-        >>> # Enabled with custom budget
-        >>> request.thinking = {"type": "enabled", "budget_tokens": 8000}
-        >>> extract_thinking_config_from_anthropic(request)
-        ThinkingConfig(enabled=True, budget_tokens=8000)
+        Lower-cased, whitespace-stripped string, or None when the value is not
+        a string or is empty/whitespace-only
     """
-    if not request.thinking:
-        # No thinking specified → use defaults
-        return ThinkingConfig(enabled=True, budget_tokens=None)
-    
-    if not isinstance(request.thinking, dict):
-        # Invalid format → use defaults
-        return ThinkingConfig(enabled=True, budget_tokens=None)
-    
-    thinking_type = request.thinking.get("type")
-    
-    if thinking_type == "disabled":
-        # Explicitly disabled
-        return ThinkingConfig(enabled=False, budget_tokens=None)
-    
-    if thinking_type == "enabled":
-        # Extract budget_tokens
-        budget = request.thinking.get("budget_tokens")
-        if budget:
-            logger.debug(f"Extracted thinking config from Anthropic: type='enabled', budget={budget}")
-        return ThinkingConfig(enabled=True, budget_tokens=budget)
-    
-    # Unknown type → use defaults
-    return ThinkingConfig(enabled=True, budget_tokens=None)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def extract_thinking_config_from_anthropic(request: AnthropicMessagesRequest) -> ThinkingConfig:
+    """Resolve Anthropic thinking settings into the unified three-state model.
+
+    Priority is: explicit disable, explicit numeric budget, Claude Code
+    ``output_config.effort``, compatible ``reasoning_effort``, then the default
+    fake-reasoning path. Only cc's five effort tiers are preserved verbatim; any
+    other value falls back to EFFORT_FALLBACK ("medium"). The ``thinking``
+    parameter is the one place a client can still explicitly disable reasoning.
+    """
+    thinking = request.thinking if isinstance(request.thinking, dict) else None
+
+    if thinking is not None and thinking.get("type") == "disabled":
+        return ThinkingConfig(enabled=False)
+
+    if thinking is not None:
+        raw_budget = thinking.get("budget_tokens")
+        if (
+            isinstance(raw_budget, int)
+            and not isinstance(raw_budget, bool)
+            and raw_budget > 0
+        ):
+            logger.debug(
+                "Extracted thinking config from Anthropic: "
+                f"source='thinking.budget_tokens', budget={raw_budget}"
+            )
+            return ThinkingConfig(budget_tokens=raw_budget)
+
+    client_effort = _normalize_effort(
+        getattr(request.output_config, "effort", None)
+    )
+    if client_effort is not None:
+        if client_effort not in EFFORT_ORDER:
+            logger.warning(
+                f"Unknown output_config.effort='{client_effort}', "
+                f"defaulting to '{EFFORT_FALLBACK}'"
+            )
+            return ThinkingConfig(effort=EFFORT_FALLBACK)
+        logger.debug(
+            "Extracted thinking config from Anthropic: "
+            f"source='output_config.effort', effort='{client_effort}'"
+        )
+        return ThinkingConfig(effort=client_effort)
+
+    native_effort = _normalize_effort(request.reasoning_effort)
+    if native_effort is not None:
+        if native_effort not in EFFORT_ORDER:
+            logger.warning(
+                f"Unknown reasoning_effort='{native_effort}', "
+                f"defaulting to '{EFFORT_FALLBACK}'"
+            )
+            return ThinkingConfig(effort=EFFORT_FALLBACK)
+        logger.debug(
+            "Extracted thinking config from Anthropic: "
+            f"source='reasoning_effort', effort='{native_effort}'"
+        )
+        return ThinkingConfig(effort=native_effort)
+
+    return ThinkingConfig()
 
 
 def anthropic_to_kiro(
@@ -462,7 +487,7 @@ def anthropic_to_kiro(
 
     # Get model ID for Kiro API (normalizes + resolves hidden models)
     # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid
-    model_id = get_model_id_for_kiro(request.model, HIDDEN_MODELS)
+    model_id = get_model_id_for_kiro(request.model, HIDDEN_MODELS, MODEL_ALIASES)
 
     # Extract thinking configuration from thinking parameter
     thinking_config = extract_thinking_config_from_anthropic(request)
@@ -471,7 +496,8 @@ def anthropic_to_kiro(
         f"Converting Anthropic request: model={request.model} -> {model_id}, "
         f"messages={len(unified_messages)}, tools={len(unified_tools) if unified_tools else 0}, "
         f"system_prompt_length={len(system_prompt)}, "
-        f"thinking_enabled={thinking_config.enabled}, thinking_budget={thinking_config.budget_tokens}"
+        f"thinking_enabled={thinking_config.enabled}, thinking_budget={thinking_config.budget_tokens}, "
+        f"thinking_effort={thinking_config.effort}"
     )
 
     # Use core function to build payload

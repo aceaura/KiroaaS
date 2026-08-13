@@ -969,3 +969,23 @@ class TestAccountSystemConfig:
         
         print(f"Comparing STATE_SAVE_INTERVAL_SECONDS: Expected 10, Got {config_module.STATE_SAVE_INTERVAL_SECONDS}")
         assert config_module.STATE_SAVE_INTERVAL_SECONDS == 10
+
+
+class TestEffortVocabulary:
+    """The cc 5-tier effort vocabulary and its fallback."""
+
+    def test_effort_order_is_five_tiers(self):
+        """EFFORT_ORDER is exactly cc's five tiers, no none/minimal."""
+        from kiro.config import EFFORT_ORDER
+        assert EFFORT_ORDER == ("low", "medium", "high", "xhigh", "max")
+
+    def test_effort_fallback_is_medium(self):
+        """Unknown tiers land on medium."""
+        from kiro.config import EFFORT_FALLBACK
+        assert EFFORT_FALLBACK == "medium"
+
+    def test_medium_in_every_model(self):
+        """The fallback tier must be accepted by every model in the schema."""
+        from kiro.config import MODEL_EFFORT_SCHEMA
+        for model_id, (_path, allowed) in MODEL_EFFORT_SCHEMA.items():
+            assert "medium" in allowed, model_id
