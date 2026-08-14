@@ -554,6 +554,14 @@ EFFORT_ORDER: Tuple[str, ...] = (
 # MODEL_EFFORT_SCHEMA accepts "medium", so this is always a safe default.
 EFFORT_FALLBACK: str = "medium"
 
+# OpenAI-only effort values mapped into the cc five-tier vocabulary BEFORE native
+# resolution. OpenAI's "minimal" has no Codex/cc equivalent, so it lands on the lowest
+# real tier ("low") instead of the generic "medium" fallback. "none" is intentionally
+# NOT an alias here -- the OpenAI converter turns it into an explicit disable
+# (ThinkingConfig(enabled=False)) so GPT keeps reasoning.effort=none and Claude omits
+# the native field.
+OPENAI_EFFORT_ALIASES: Dict[str, str] = {"minimal": "low"}
+
 # Master switch for the native effort field. When disabled the gateway reverts
 # completely to its previous behaviour: the tier lands only in the injected prompt
 # tags and no additionalModelRequestFields is ever sent.

@@ -1637,10 +1637,11 @@ class TestExtractThinkingConfigFromOpenAI:
         assert config.budget_tokens is None
         assert config.effort is None
 
-    def test_reasoning_effort_none_falls_back_to_medium(self):
+    def test_reasoning_effort_none_disables_reasoning(self):
         """
-        What it does: Verifies "none" (outside cc's 5 tiers) falls back to medium
-        Purpose: cc clients only send the 5 tiers; "none" is not a disabled channel here
+        What it does: Verifies OpenAI "none" maps to an explicit disable
+        Purpose: "none" means the client asked for no reasoning; GPT keeps
+        reasoning.effort=none downstream while Claude omits the native field
         """
         request = ChatCompletionRequest(
             model="claude-sonnet-4.5",
@@ -1648,9 +1649,9 @@ class TestExtractThinkingConfigFromOpenAI:
             reasoning_effort="none"
         )
         config = extract_thinking_config_from_openai(request)
-        assert config.enabled is True
+        assert config.enabled is False
         assert config.budget_tokens is None
-        assert config.effort == "medium"
+        assert config.effort is None
 
     def test_reasoning_effort_preserved_verbatim(self):
         """
@@ -1668,10 +1669,11 @@ class TestExtractThinkingConfigFromOpenAI:
             assert config.budget_tokens is None
             assert config.effort == tier
 
-    def test_reasoning_effort_minimal_falls_back_to_medium(self):
+    def test_reasoning_effort_minimal_maps_to_low(self):
         """
-        What it does: Verifies "minimal" (outside cc's 5 tiers) falls back to medium
-        Purpose: unknown tiers default to medium instead of being dropped
+        What it does: Verifies OpenAI "minimal" maps onto the lowest cc tier (low)
+        Purpose: "minimal" has no Codex/cc equivalent, so it lands on "low" rather
+        than the generic "medium" fallback
         """
         request = ChatCompletionRequest(
             model="claude-sonnet-4.5",
@@ -1680,7 +1682,7 @@ class TestExtractThinkingConfigFromOpenAI:
         )
         config = extract_thinking_config_from_openai(request)
         assert config.enabled is True
-        assert config.effort == "medium"
+        assert config.effort == "low"
 
     def test_effort_independent_of_max_tokens(self):
         """

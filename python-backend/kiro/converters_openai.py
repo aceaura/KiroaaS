@@ -33,7 +33,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from kiro.config import EFFORT_FALLBACK, EFFORT_ORDER, HIDDEN_MODELS, MODEL_ALIASES
+from kiro.config import (
+    EFFORT_FALLBACK,
+    EFFORT_ORDER,
+    HIDDEN_MODELS,
+    MODEL_ALIASES,
+    OPENAI_EFFORT_ALIASES,
+)
 from kiro.model_resolver import get_model_id_for_kiro
 from kiro.models_openai import ChatMessage, ChatCompletionRequest, Tool
 
@@ -300,18 +306,40 @@ def convert_openai_tools_to_unified(tools: Optional[List[Tool]]) -> Optional[Lis
 def extract_thinking_config_from_openai(request: ChatCompletionRequest) -> ThinkingConfig:
     """Resolve OpenAI reasoning effort into the unified thinking model.
 
-    Only cc's five tiers (low/medium/high/xhigh/max) are preserved verbatim. Any other
-    value -- OpenAI's "none"/"minimal", typos, etc. -- falls back to EFFORT_FALLBACK
-    ("medium"), since cc clients only ever send the five tiers. An omitted value uses
-    the existing default fake-reasoning path.
+    cc's five tiers (low/medium/high/xhigh/max) are preserved verbatim. OpenAI-specific
+    values are normalized before native resolution:
+
+    - "none"  -> explicit disable (ThinkingConfig(enabled=False)). GPT then keeps
+      reasoning.effort=none while Claude omits the native field entirely, and no fake
+      reasoning tags are injected -- matching the client's "no reasoning" intent.
+    - "minimal" (and any alias in OPENAI_EFFORT_ALIASES) -> mapped onto the closest cc
+      tier ("low"), instead of the generic "medium" fallback.
+
+    Any remaining unknown value (typos, etc.) falls back to EFFORT_FALLBACK ("medium").
+    An omitted value uses the existing default fake-reasoning path.
     """
     effort = request.reasoning_effort
     if not effort:
         return ThinkingConfig()
 
-    if not isinstance(effort, str) or effort not in EFFORT_ORDER:
+    if not isinstance(effort, str):
         logger.warning(
             f"Unknown reasoning_effort='{effort}', "
+            f"defaulting to '{EFFORT_FALLBACK}'"
+        )
+        return ThinkingConfig(effort=EFFORT_FALLBACK)
+
+    # OpenAI "none" = the client asked for no reasoning at all.
+    if effort == "none":
+        logger.debug("OpenAI reasoning_effort='none' -> explicit disable")
+        return ThinkingConfig(enabled=False)
+
+    # Map OpenAI-only aliases (e.g. "minimal") into the cc five-tier vocabulary.
+    effort = OPENAI_EFFORT_ALIASES.get(effort, effort)
+
+    if effort not in EFFORT_ORDER:
+        logger.warning(
+            f"Unknown reasoning_effort='{request.reasoning_effort}', "
             f"defaulting to '{EFFORT_FALLBACK}'"
         )
         return ThinkingConfig(effort=EFFORT_FALLBACK)
