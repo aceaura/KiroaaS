@@ -15,6 +15,7 @@ from kiro.config import (
 )
 from kiro.effort_schema import (
     clamp_effort,
+    resolve_effort_decision,
     resolve_native_effort,
 )
 
@@ -126,3 +127,66 @@ class TestResolveNativeEffort:
                 d = resolve_native_effort(model_id, tier)
                 if d is not None:
                     assert d.adopted in allowed, (model_id, tier, d.adopted)
+
+
+class TestResolveEffortDecision:
+    """Auditable decisions describe both native injection and omission."""
+
+    def test_exact_native_decision(self):
+        d = resolve_effort_decision("gpt-5.6-sol", "xhigh")
+        assert d.requested == "xhigh"
+        assert d.adopted == "xhigh"
+        assert d.schema_path == "reasoning"
+        assert d.field == "reasoning.effort"
+        assert d.fragment == {"reasoning": {"effort": "xhigh"}}
+        assert d.outcome == "native"
+        assert d.clamped is False
+        assert d.reason == "exact"
+
+    def test_clamped_native_decision(self):
+        d = resolve_effort_decision("claude-sonnet-4.6", "xhigh")
+        assert d.requested == "xhigh"
+        assert d.adopted == "high"
+        assert d.field == "output_config.effort"
+        assert d.fragment == {"output_config": {"effort": "high"}}
+        assert d.outcome == "native"
+        assert d.clamped is True
+        assert d.reason == "clamped"
+
+    def test_gpt_none_is_native(self):
+        d = resolve_effort_decision("gpt-5.6-sol", "none")
+        assert d.adopted == "none"
+        assert d.field == "reasoning.effort"
+        assert d.outcome == "native"
+        assert d.reason == "exact"
+
+    def test_claude_none_is_omitted(self):
+        d = resolve_effort_decision("claude-opus-5", "none")
+        assert d.requested == "none"
+        assert d.adopted is None
+        assert d.field is None
+        assert d.fragment is None
+        assert d.outcome == "omitted"
+        assert d.reason == "unsupported_none"
+
+    def test_no_request_is_omitted(self):
+        d = resolve_effort_decision("claude-opus-5", None)
+        assert d.requested is None
+        assert d.fragment is None
+        assert d.outcome == "omitted"
+        assert d.reason == "no_request"
+
+    def test_unsupported_model_is_omitted(self):
+        d = resolve_effort_decision("claude-haiku-4.5", "high")
+        assert d.requested == "high"
+        assert d.fragment is None
+        assert d.outcome == "omitted"
+        assert d.reason == "unsupported_model"
+
+    def test_native_disabled_is_omitted(self, monkeypatch):
+        monkeypatch.setattr("kiro.effort_schema.NATIVE_EFFORT_ENABLED", False)
+        d = resolve_effort_decision("claude-opus-5", "high")
+        assert d.requested == "high"
+        assert d.fragment is None
+        assert d.outcome == "omitted"
+        assert d.reason == "native_disabled"

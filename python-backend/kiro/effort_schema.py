@@ -58,19 +58,25 @@ NATIVE_EFFORT_FIELD = "additionalModelRequestFields"
 
 @dataclass
 class EffortDecision:
-    """The outcome of resolving one requested tier against one model.
+    """Auditable outcome of resolving one requested tier against one model.
 
-    Attributes:
-        fragment: Value for the ``additionalModelRequestFields`` key, e.g.
-            ``{"output_config": {"effort": "high"}}``.
-        adopted: The tier actually sent, always inside the model's enum.
-        clamped: True when ``adopted`` differs from what the client requested.
-        reason: Human-readable explanation, for logs. Empty when nothing was clamped.
+    ``fragment`` is ``None`` when no native field is sent.  Keeping omitted
+    decisions explicit lets the caller emit one authoritative, privacy-safe log
+    line for every request without inspecting the request body.
     """
-    fragment: Dict[str, Dict[str, str]]
-    adopted: str
+
+    requested: Optional[str]
+    adopted: Optional[str]
+    schema_path: Optional[str]
+    fragment: Optional[Dict[str, Dict[str, str]]]
     clamped: bool
-    reason: str = ""
+    outcome: str
+    reason: str
+
+    @property
+    def field(self) -> Optional[str]:
+        """Return the dotted native field path, or None when omitted."""
+        return f"{self.schema_path}.effort" if self.schema_path else None
 
 
 def lookup_effort_schema(model_id: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
@@ -131,59 +137,79 @@ def clamp_effort(requested: str, allowed: Tuple[str, ...]) -> Optional[str]:
     return min(candidates, key=EFFORT_ORDER.index)
 
 
-def resolve_native_effort(model_id: str, effort: Optional[str]) -> Optional[EffortDecision]:
-    """Resolve a tier into a payload fragment, or None to send no native field.
+def resolve_effort_decision(model_id: str, effort: Optional[str]) -> EffortDecision:
+    """Resolve a tier into an auditable native-field decision.
 
-    None is returned -- and the field omitted -- when the master switch is off, no tier
-    was requested, the model has no native channel, or the request is "none" against a
-    model with no "none" tier. Anything else resolves to a concrete tier: unknown words
-    fall back to EFFORT_FALLBACK inside clamp_effort.
+    Omitted decisions are explicit so the payload builder can emit one authoritative
+    log line without examining request content. The decision itself remains the sole
+    source of truth for whether ``additionalModelRequestFields`` is injected.
     """
     if not NATIVE_EFFORT_ENABLED:
-        return None
+        return EffortDecision(
+            requested=effort,
+            adopted=None,
+            schema_path=None,
+            fragment=None,
+            clamped=False,
+            outcome="omitted",
+            reason="native_disabled",
+        )
 
     if not effort:
-        return None
+        return EffortDecision(
+            requested=effort,
+            adopted=None,
+            schema_path=None,
+            fragment=None,
+            clamped=False,
+            outcome="omitted",
+            reason="no_request",
+        )
 
     schema = lookup_effort_schema(model_id)
     if schema is None:
-        logger.debug(
-            f"Model '{model_id}' has no native effort channel, skipping "
-            f"{NATIVE_EFFORT_FIELD} injection (requested effort='{effort}')"
+        return EffortDecision(
+            requested=effort,
+            adopted=None,
+            schema_path=None,
+            fragment=None,
+            clamped=False,
+            outcome="omitted",
+            reason="unsupported_model",
         )
-        return None
 
     path, allowed = schema
     adopted = clamp_effort(effort, allowed)
     if adopted is None:
-        # Only "none" against a model without a "none" tier reaches here (every Claude
-        # model): substituting a real tier would manufacture reasoning the client
-        # declined. Routine, so DEBUG.
-        logger.debug(
-            f"Model '{model_id}' has no 'none' effort tier, skipping "
-            f"{NATIVE_EFFORT_FIELD} injection"
+        return EffortDecision(
+            requested=effort,
+            adopted=None,
+            schema_path=None,
+            fragment=None,
+            clamped=False,
+            outcome="omitted",
+            reason="unsupported_none",
         )
-        return None
 
     clamped = adopted != effort
-    reason = ""
     if clamped:
-        reason = (
-            f"'{effort}' is not accepted by '{model_id}'; clamped to '{adopted}' "
-            f"(allowed: {', '.join(allowed)})"
-        )
         logger.warning(
             f"Clamped effort for '{model_id}': client requested '{effort}', "
             f"sending '{adopted}' (allowed: {', '.join(allowed)})"
         )
-    else:
-        logger.debug(
-            f"Native effort for '{model_id}': {path}.effort='{adopted}'"
-        )
 
     return EffortDecision(
-        fragment={path: {"effort": adopted}},
+        requested=effort,
         adopted=adopted,
+        schema_path=path,
+        fragment={path: {"effort": adopted}},
         clamped=clamped,
-        reason=reason,
+        outcome="native",
+        reason="clamped" if clamped else "exact",
     )
+
+
+def resolve_native_effort(model_id: str, effort: Optional[str]) -> Optional[EffortDecision]:
+    """Compatibility wrapper returning None when no native field should be sent."""
+    decision = resolve_effort_decision(model_id, effort)
+    return decision if decision.fragment is not None else None

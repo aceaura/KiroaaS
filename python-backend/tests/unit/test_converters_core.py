@@ -6488,3 +6488,84 @@ class TestBuildKiroPayloadWithThinkingConfig:
         print(f"Checking for <max_thinking_length>7000</max_thinking_length> in content...")
         assert "<max_thinking_length>7000</max_thinking_length>" in content
         assert "<thinking_mode>enabled</thinking_mode>" in content
+
+
+class TestEffortDecisionLogging:
+    """The unified payload builder emits one privacy-safe effort audit line."""
+
+    @staticmethod
+    def build(model_id, thinking_config, system_prompt="SYSTEM_SECRET"):
+        return build_kiro_payload(
+            messages=[UnifiedMessage(role="user", content="MESSAGE_SECRET")],
+            system_prompt=system_prompt,
+            model_id=model_id,
+            tools=None,
+            conversation_id="CONVERSATION_SECRET",
+            profile_arn="PROFILE_SECRET",
+            thinking_config=thinking_config,
+        )
+
+    def test_exact_native_log_and_payload_match(self):
+        with patch("kiro.converters_core.logger.info") as mock_info:
+            result = self.build("gpt-5.6-sol", ThinkingConfig(effort="xhigh"))
+
+        effort_logs = [
+            call.args[0] for call in mock_info.call_args_list
+            if call.args and call.args[0].startswith("effort_decision ")
+        ]
+        assert effort_logs == [
+            "effort_decision model=gpt-5.6-sol requested=xhigh adopted=xhigh "
+            "field=reasoning.effort outcome=native clamped=false reason=exact"
+        ]
+        assert result.payload["additionalModelRequestFields"] == {
+            "reasoning": {"effort": "xhigh"}
+        }
+
+    def test_clamped_log_and_payload_match(self):
+        with patch("kiro.converters_core.logger.info") as mock_info:
+            result = self.build("claude-sonnet-4.6", ThinkingConfig(effort="xhigh"))
+
+        effort_logs = [
+            call.args[0] for call in mock_info.call_args_list
+            if call.args and call.args[0].startswith("effort_decision ")
+        ]
+        assert effort_logs == [
+            "effort_decision model=claude-sonnet-4.6 requested=xhigh adopted=high "
+            "field=output_config.effort outcome=native clamped=true reason=clamped"
+        ]
+        assert result.payload["additionalModelRequestFields"] == {
+            "output_config": {"effort": "high"}
+        }
+
+    def test_disabled_claude_log_is_omitted(self):
+        with patch("kiro.converters_core.logger.info") as mock_info:
+            result = self.build("claude-opus-5", ThinkingConfig(enabled=False))
+
+        effort_logs = [
+            call.args[0] for call in mock_info.call_args_list
+            if call.args and call.args[0].startswith("effort_decision ")
+        ]
+        assert effort_logs == [
+            "effort_decision model=claude-opus-5 requested=none adopted=none "
+            "field=none outcome=omitted clamped=false reason=unsupported_none"
+        ]
+        assert "additionalModelRequestFields" not in result.payload
+
+    def test_no_request_log_is_omitted_and_redacted(self):
+        with patch("kiro.converters_core.logger.info") as mock_info:
+            result = self.build("claude-opus-5", ThinkingConfig())
+
+        effort_logs = [
+            call.args[0] for call in mock_info.call_args_list
+            if call.args and call.args[0].startswith("effort_decision ")
+        ]
+        assert effort_logs == [
+            "effort_decision model=claude-opus-5 requested=none adopted=none "
+            "field=none outcome=omitted clamped=false reason=no_request"
+        ]
+        assert "additionalModelRequestFields" not in result.payload
+        log = effort_logs[0]
+        for secret in (
+            "SYSTEM_SECRET", "MESSAGE_SECRET", "CONVERSATION_SECRET", "PROFILE_SECRET"
+        ):
+            assert secret not in log

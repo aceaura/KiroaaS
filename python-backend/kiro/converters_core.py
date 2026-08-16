@@ -46,7 +46,7 @@ from kiro.config import (
     NATIVE_EFFORT_NONE_ON_DISABLED,
     NATIVE_EFFORT_SUPPRESS_TAGS,
 )
-from kiro.effort_schema import NATIVE_EFFORT_FIELD, resolve_native_effort
+from kiro.effort_schema import NATIVE_EFFORT_FIELD, resolve_effort_decision
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 
 
@@ -1478,12 +1478,22 @@ def build_kiro_payload(
         requested_effort = "none" if NATIVE_EFFORT_NONE_ON_DISABLED else None
     else:
         requested_effort = thinking_config.effort
-    native_effort = resolve_native_effort(model_id, requested_effort)
+    effort_decision = resolve_effort_decision(model_id, requested_effort)
+    logger.info(
+        "effort_decision "
+        f"model={model_id} "
+        f"requested={effort_decision.requested or 'none'} "
+        f"adopted={effort_decision.adopted or 'none'} "
+        f"field={effort_decision.field or 'none'} "
+        f"outcome={effort_decision.outcome} "
+        f"clamped={str(effort_decision.clamped).lower()} "
+        f"reason={effort_decision.reason}"
+    )
 
     # Tags are redundant once the native field carries the tier, and measurably harmful:
     # stacking both channels produced less reasoning than either alone. Models with no
     # native channel keep the tags -- they are its only reasoning control.
-    suppress_tags = native_effort is not None and NATIVE_EFFORT_SUPPRESS_TAGS
+    suppress_tags = effort_decision.fragment is not None and NATIVE_EFFORT_SUPPRESS_TAGS
 
     # Add thinking mode legitimization to system prompt if enabled.
     # Skipped alongside the tags: this block exists to legitimize them, so without them
@@ -1596,7 +1606,7 @@ def build_kiro_payload(
         if suppress_tags:
             logger.debug(
                 "Skipping thinking tag injection: the native effort field already "
-                f"carries effort='{native_effort.adopted}'"
+                f"carries effort='{effort_decision.adopted}'"
             )
         else:
             current_content = inject_thinking_tags(current_content, thinking_config)
@@ -1637,8 +1647,8 @@ def build_kiro_payload(
 
     # Add Kiro's native effort field. Top level, sibling of the two keys above.
     # Placed before the size guard so it counts toward the payload budget.
-    if native_effort is not None:
-        payload[NATIVE_EFFORT_FIELD] = native_effort.fragment
+    if effort_decision.fragment is not None:
+        payload[NATIVE_EFFORT_FIELD] = effort_decision.fragment
 
     # Payload size guard — auto-trim if enabled
     if AUTO_TRIM_PAYLOAD:
