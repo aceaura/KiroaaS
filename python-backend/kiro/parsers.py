@@ -29,6 +29,8 @@ Contains classes and functions for:
 
 import json
 import re
+import struct
+import zlib
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -248,53 +250,197 @@ class AwsEventStreamParser:
         ('{"contextUsagePercentage":', 'context_usage'),
     ]
     
+    _MAX_FRAME_SIZE = 4 * 1024 * 1024
+    _HEADER_VALUE_SIZES = {
+        0: 0,  # bool true
+        1: 0,  # bool false
+        2: 1,  # byte
+        3: 2,  # short
+        4: 4,  # int
+        5: 8,  # long
+        6: -1,  # byte array
+        7: -1,  # string
+        8: 8,  # timestamp
+        9: 16,  # uuid
+    }
+
     def __init__(self):
         """Initializes the parser."""
         self.buffer = ""
+        self._binary_buffer = bytearray()
+        self._stream_mode: Optional[str] = None
         self.last_content: Optional[str] = None  # For deduplicating repeating content
         self.current_tool_call: Optional[Dict[str, Any]] = None
         self.tool_calls: List[Dict[str, Any]] = []
-    
+
     def feed(self, chunk: bytes) -> List[Dict[str, Any]]:
         """
         Adds chunk to buffer and returns parsed events.
-        
+
+        AWS Event Stream frames are decoded using their prelude and ``:event-type``
+        header. Plain JSON scanning is retained as a compatibility fallback.
+
         Args:
             chunk: Bytes of data from stream
-        
+
         Returns:
             List of events in {"type": str, "data": Any} format
         """
+        if self._stream_mode != "text":
+            self._binary_buffer.extend(chunk)
+            if self._stream_mode is None:
+                mode = self._detect_stream_mode()
+                if mode is None:
+                    return []
+                self._stream_mode = mode
+
+            if self._stream_mode == "aws":
+                return self._feed_aws_frames()
+
+            chunk = bytes(self._binary_buffer)
+            self._binary_buffer.clear()
+
+        return self._feed_text(chunk)
+
+    def _detect_stream_mode(self) -> Optional[str]:
+        """Detect AWS framing without misclassifying incomplete binary data."""
+        if not self._binary_buffer:
+            return None
+        if self._binary_buffer[0] != 0:
+            return "text"
+        if len(self._binary_buffer) < 12:
+            return None
+
+        total_length, headers_length, prelude_crc = struct.unpack(
+            ">III", self._binary_buffer[:12]
+        )
+        if not (
+            16 <= total_length <= self._MAX_FRAME_SIZE
+            and headers_length <= total_length - 16
+            and zlib.crc32(self._binary_buffer[:8]) & 0xFFFFFFFF == prelude_crc
+        ):
+            return "text"
+        return "aws"
+
+    def _feed_aws_frames(self) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
+        while len(self._binary_buffer) >= 12:
+            total_length, headers_length, prelude_crc = struct.unpack(
+                ">III", self._binary_buffer[:12]
+            )
+            if not (
+                16 <= total_length <= self._MAX_FRAME_SIZE
+                and headers_length <= total_length - 16
+                and zlib.crc32(self._binary_buffer[:8]) & 0xFFFFFFFF == prelude_crc
+            ):
+                logger.warning("Invalid AWS Event Stream prelude; dropping buffered frame")
+                self._binary_buffer.clear()
+                break
+            if len(self._binary_buffer) < total_length:
+                break
+
+            frame = bytes(self._binary_buffer[:total_length])
+            del self._binary_buffer[:total_length]
+            expected_crc = struct.unpack(">I", frame[-4:])[0]
+            if zlib.crc32(frame[:-4]) & 0xFFFFFFFF != expected_crc:
+                logger.warning("Invalid AWS Event Stream message CRC; dropping frame")
+                continue
+
+            headers = frame[12:12 + headers_length]
+            payload = frame[12 + headers_length:-4]
+            event_type = self._extract_event_type(headers)
+            event = self._process_aws_event(event_type, payload)
+            if event:
+                events.append(event)
+        return events
+
+    def _extract_event_type(self, headers: bytes) -> Optional[str]:
+        """Extract the string ``:event-type`` header from an AWS frame."""
+        offset = 0
+        while offset < len(headers):
+            name_length = headers[offset]
+            offset += 1
+            if offset + name_length + 1 > len(headers):
+                return None
+            name = headers[offset:offset + name_length].decode("utf-8", errors="ignore")
+            offset += name_length
+            value_type = headers[offset]
+            offset += 1
+            value_size = self._HEADER_VALUE_SIZES.get(value_type)
+            if value_size is None:
+                return None
+            if value_size < 0:
+                if offset + 2 > len(headers):
+                    return None
+                value_size = struct.unpack(">H", headers[offset:offset + 2])[0]
+                offset += 2
+            if offset + value_size > len(headers):
+                return None
+            value = headers[offset:offset + value_size]
+            offset += value_size
+            if name == ":event-type" and value_type == 7:
+                return value.decode("utf-8", errors="ignore")
+        return None
+
+    def _process_aws_event(
+        self,
+        event_type: Optional[str],
+        payload: bytes,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            logger.warning(f"Failed to parse AWS event payload type={event_type or 'unknown'}")
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        if event_type == "assistantResponseEvent":
+            return self._process_content_event(data)
+        if event_type == "meteringEvent":
+            return self._process_event(data, "usage")
+        if event_type == "contextUsageEvent":
+            return self._process_event(data, "context_usage")
+        if event_type == "toolUseEvent":
+            if "name" in data:
+                return self._process_event(data, "tool_start")
+            if "input" in data:
+                return self._process_event(data, "tool_input")
+            if "stop" in data:
+                return self._process_event(data, "tool_stop")
+        return None
+
+    def _feed_text(self, chunk: bytes) -> List[Dict[str, Any]]:
         try:
             self.buffer += chunk.decode('utf-8', errors='ignore')
         except Exception:
             return []
-        
+
         events = []
-        
+
         while True:
             # Find nearest pattern
             earliest_pos = -1
             earliest_type = None
-            
+
             for pattern, event_type in self.EVENT_PATTERNS:
                 pos = self.buffer.find(pattern)
                 if pos != -1 and (earliest_pos == -1 or pos < earliest_pos):
                     earliest_pos = pos
                     earliest_type = event_type
-            
+
             if earliest_pos == -1:
                 break
-            
+
             # Find JSON end
             json_end = find_matching_brace(self.buffer, earliest_pos)
             if json_end == -1:
                 # JSON not complete, wait for more data
                 break
-            
+
             json_str = self.buffer[earliest_pos:json_end + 1]
             self.buffer = self.buffer[json_end + 1:]
-            
+
             try:
                 data = json.loads(json_str)
                 event = self._process_event(data, earliest_type)
@@ -302,7 +448,7 @@ class AwsEventStreamParser:
                     events.append(event)
             except json.JSONDecodeError:
                 logger.warning(f"Failed to parse JSON: {json_str[:100]}")
-        
+
         return events
     
     def _process_event(self, data: dict, event_type: str) -> Optional[Dict[str, Any]]:
@@ -564,6 +710,8 @@ class AwsEventStreamParser:
     def reset(self) -> None:
         """Resets parser state."""
         self.buffer = ""
+        self._binary_buffer.clear()
+        self._stream_mode = None
         self.last_content = None
         self.current_tool_call = None
         self.tool_calls = []

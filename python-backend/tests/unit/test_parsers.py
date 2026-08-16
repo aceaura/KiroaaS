@@ -5,6 +5,10 @@ Unit tests for AwsEventStreamParser and auxiliary parsing functions.
 Tests the parsing logic for AWS SSE stream from Kiro API.
 """
 
+import json
+import struct
+import zlib
+
 import pytest
 
 from kiro.parsers import (
@@ -13,6 +17,31 @@ from kiro.parsers import (
     parse_bracket_tool_calls,
     deduplicate_tool_calls
 )
+
+
+def _aws_string_header(name, value):
+    name_bytes = name.encode()
+    value_bytes = value.encode()
+    return (
+        bytes([len(name_bytes)])
+        + name_bytes
+        + b"\x07"
+        + struct.pack(">H", len(value_bytes))
+        + value_bytes
+    )
+
+
+def _aws_event_frame(event_type, payload):
+    headers = (
+        _aws_string_header(":message-type", "event")
+        + _aws_string_header(":event-type", event_type)
+    )
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    total_length = 16 + len(headers) + len(payload_bytes)
+    prelude_values = struct.pack(">II", total_length, len(headers))
+    prelude = prelude_values + struct.pack(">I", zlib.crc32(prelude_values) & 0xFFFFFFFF)
+    message = prelude + headers + payload_bytes
+    return message + struct.pack(">I", zlib.crc32(message) & 0xFFFFFFFF)
 
 
 class TestFindMatchingBrace:
@@ -487,15 +516,45 @@ class TestAwsEventStreamParserFeed:
         """
         print("Setup: Chunk with context usage...")
         chunk = b'{"contextUsagePercentage":25.5}'
-        
+
         print("Action: Parsing chunk...")
         events = aws_event_parser.feed(chunk)
-        
+
         print(f"Result: {events}")
         assert len(events) == 1
         assert events[0]["type"] == "context_usage"
         assert events[0]["data"] == 25.5
-    
+
+    def test_parses_split_aws_frames_by_event_type(self, aws_event_parser):
+        content = _aws_event_frame(
+            "assistantResponseEvent",
+            {"content": "Hello from AWS"},
+        )
+        metering = _aws_event_frame(
+            "meteringEvent",
+            {"inputTokens": 12, "usage": 0.06745126666668, "outputTokens": 4},
+        )
+        stream = content + metering
+
+        events = []
+        for boundary in (5, 19, len(content) + 7, len(stream)):
+            start = 0 if not events and boundary == 5 else previous
+            events.extend(aws_event_parser.feed(stream[start:boundary]))
+            previous = boundary
+
+        assert events == [
+            {"type": "content", "data": "Hello from AWS"},
+            {"type": "usage", "data": 0.06745126666668},
+        ]
+
+    def test_parses_zero_usage_from_aws_metering_frame(self, aws_event_parser):
+        frame = _aws_event_frame(
+            "meteringEvent",
+            {"inputTokens": 1, "usage": 0, "outputTokens": 1},
+        )
+
+        assert aws_event_parser.feed(frame) == [{"type": "usage", "data": 0}]
+
     def test_handles_incomplete_json(self, aws_event_parser):
         """
         What it does: Tests handling of incomplete JSON.
