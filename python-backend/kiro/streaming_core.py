@@ -38,6 +38,7 @@ import httpx
 from loguru import logger
 
 from kiro.parsers import AwsEventStreamParser, parse_bracket_tool_calls, deduplicate_tool_calls
+from kiro.request_audit import RequestAudit
 from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
     FIRST_TOKEN_MAX_RETRIES,
@@ -81,7 +82,7 @@ class KiroEvent:
     content: Optional[str] = None
     thinking_content: Optional[str] = None
     tool_use: Optional[Dict[str, Any]] = None
-    usage: Optional[Dict[str, Any]] = None
+    usage: Optional[Any] = None
     context_usage_percentage: Optional[float] = None
     is_first_thinking_chunk: bool = False
     is_last_thinking_chunk: bool = False
@@ -102,7 +103,7 @@ class StreamResult:
     content: str = ""
     thinking_content: str = ""
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
-    usage: Optional[Dict[str, Any]] = None
+    usage: Optional[Any] = None
     context_usage_percentage: Optional[float] = None
 
 
@@ -289,7 +290,8 @@ async def _process_chunk(
 async def collect_stream_to_result(
     response: httpx.Response,
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
-    enable_thinking_parser: bool = True
+    enable_thinking_parser: bool = True,
+    request_audit: Optional[RequestAudit] = None,
 ) -> StreamResult:
     """
     Collects full response from Kiro stream.
@@ -317,8 +319,10 @@ async def collect_stream_to_result(
             full_content_for_bracket_tools += event.thinking_content
         elif event.type == "tool_use" and event.tool_use:
             result.tool_calls.append(event.tool_use)
-        elif event.type == "usage" and event.usage:
+        elif event.type == "usage" and event.usage is not None:
             result.usage = event.usage
+            if request_audit is not None:
+                request_audit.record_metering(event.usage)
         elif event.type == "context_usage" and event.context_usage_percentage is not None:
             result.context_usage_percentage = event.context_usage_percentage
     

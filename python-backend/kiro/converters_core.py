@@ -48,6 +48,7 @@ from kiro.config import (
 )
 from kiro.effort_schema import NATIVE_EFFORT_FIELD, resolve_effort_decision
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
+from kiro.request_audit import RequestAudit
 
 
 # ==================================================================================================
@@ -1429,14 +1430,15 @@ def build_kiro_payload(
     tools: Optional[List[UnifiedTool]],
     conversation_id: str,
     profile_arn: str,
-    thinking_config: ThinkingConfig
+    thinking_config: ThinkingConfig,
+    request_audit: Optional[RequestAudit] = None,
 ) -> KiroPayloadResult:
     """
     Builds complete payload for Kiro API from unified data.
-    
+
     This is the main function that assembles the Kiro API payload from
     API-agnostic unified message and tool formats.
-    
+
     Args:
         messages: List of messages in unified format (without system messages)
         system_prompt: Already extracted system prompt
@@ -1445,10 +1447,11 @@ def build_kiro_payload(
         conversation_id: Unique conversation ID
         profile_arn: AWS CodeWhisperer profile ARN
         thinking_config: Thinking configuration from API adapter
-    
+        request_audit: Optional request audit state shared with the response stream.
+
     Returns:
         KiroPayloadResult with payload and tool documentation
-    
+
     Raises:
         ValueError: If there are no messages to send
     """
@@ -1479,16 +1482,19 @@ def build_kiro_payload(
     else:
         requested_effort = thinking_config.effort
     effort_decision = resolve_effort_decision(model_id, requested_effort)
-    logger.info(
-        "effort_decision "
-        f"model={model_id} "
-        f"requested={effort_decision.requested or 'none'} "
-        f"adopted={effort_decision.adopted or 'none'} "
-        f"field={effort_decision.field or 'none'} "
-        f"outcome={effort_decision.outcome} "
-        f"clamped={str(effort_decision.clamped).lower()} "
-        f"reason={effort_decision.reason}"
-    )
+    if request_audit is not None:
+        request_audit.record_effort(model_id, effort_decision)
+    else:
+        logger.info(
+            "effort_decision "
+            f"model={model_id} "
+            f"requested={effort_decision.requested or 'none'} "
+            f"adopted={effort_decision.adopted or 'none'} "
+            f"field={effort_decision.field or 'none'} "
+            f"outcome={effort_decision.outcome} "
+            f"clamped={str(effort_decision.clamped).lower()} "
+            f"reason={effort_decision.reason}"
+        )
 
     # Tags are redundant once the native field carries the tier, and measurably harmful:
     # stacking both channels produced less reasoning than either alone. Models with no

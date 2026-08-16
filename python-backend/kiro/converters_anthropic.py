@@ -30,6 +30,7 @@ from loguru import logger
 
 from kiro.config import EFFORT_FALLBACK, EFFORT_ORDER, HIDDEN_MODELS, MODEL_ALIASES
 from kiro.model_resolver import get_model_id_for_kiro
+from kiro.request_audit import RequestAudit
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
     AnthropicMessage,
@@ -452,7 +453,10 @@ def extract_thinking_config_from_anthropic(request: AnthropicMessagesRequest) ->
 
 
 def anthropic_to_kiro(
-    request: AnthropicMessagesRequest, conversation_id: str, profile_arn: str
+    request: AnthropicMessagesRequest,
+    conversation_id: str,
+    profile_arn: str,
+    request_audit: Optional[RequestAudit] = None,
 ) -> dict:
     """
     Converts Anthropic Messages API request to Kiro API payload.
@@ -468,6 +472,7 @@ def anthropic_to_kiro(
         request: Anthropic MessagesRequest
         conversation_id: Unique conversation ID
         profile_arn: AWS CodeWhisperer profile ARN
+        request_audit: Optional request audit state shared with the response stream.
 
     Returns:
         Payload dictionary for POST request to Kiro API
@@ -509,6 +514,7 @@ def anthropic_to_kiro(
         conversation_id=conversation_id,
         profile_arn=profile_arn,
         thinking_config=thinking_config,
+        request_audit=request_audit,
     )
 
     return result.payload

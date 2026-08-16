@@ -50,6 +50,7 @@ from kiro.model_resolver import ModelResolver
 from kiro.converters_openai import build_kiro_payload
 from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
 from kiro.http_client import KiroHttpClient
+from kiro.request_audit import RequestAudit
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
 from kiro.mcp_tools import handle_native_web_search
@@ -177,6 +178,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/chat/completions (model={request_data.model}, stream={request_data.stream})")
+    request_audit = RequestAudit(protocol="openai", client_model=request_data.model)
     
     # Note: prepare_new_request() and log_request_body() are now called by DebugLoggerMiddleware
     # This ensures debug logging works even for requests that fail Pydantic validation (422 errors)
@@ -330,7 +332,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 kiro_payload = build_kiro_payload(
                     request_data,
                     conversation_id,
-                    profile_arn_for_payload
+                    profile_arn_for_payload,
+                    request_audit=request_audit,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
@@ -389,7 +392,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                     auth_manager=auth_manager,
                                     initial_response=response,
                                     request_messages=messages_for_tokenizer,
-                                    request_tools=tools_for_tokenizer
+                                    request_tools=tools_for_tokenizer,
+                                    request_audit=request_audit,
                                 ):
                                     yield chunk
                             except GeneratorExit:
@@ -404,6 +408,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                 raise
                             finally:
                                 await http_client.close()
+                                request_audit.log_credit_once(
+                                    status=(
+                                        "failed" if streaming_error
+                                        else "client_disconnected" if client_disconnected
+                                        else "completed"
+                                    )
+                                )
                                 if streaming_error:
                                     error_type = type(streaming_error).__name__
                                     error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
@@ -429,10 +440,12 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                             model_cache,
                             auth_manager,
                             request_messages=messages_for_tokenizer,
-                            request_tools=tools_for_tokenizer
+                            request_tools=tools_for_tokenizer,
+                            request_audit=request_audit,
                         )
                         
                         await http_client.close()
+                        request_audit.log_credit_once(status="completed")
                         logger.info(f"HTTP 200 - POST /v1/chat/completions (non-streaming) - completed")
                         
                         if debug_logger:
@@ -578,7 +591,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         kiro_payload = build_kiro_payload(
             request_data,
             conversation_id,
-            profile_arn_for_payload
+            profile_arn_for_payload,
+            request_audit=request_audit,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -685,7 +699,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         auth_manager=auth_manager,
                         initial_response=response,
                         request_messages=messages_for_tokenizer,
-                        request_tools=tools_for_tokenizer
+                        request_tools=tools_for_tokenizer,
+                        request_audit=request_audit,
                     ):
                         yield chunk
                 except GeneratorExit:
@@ -703,6 +718,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     raise
                 finally:
                     await http_client.close()
+                    request_audit.log_credit_once(
+                        status=(
+                            "failed" if streaming_error
+                            else "client_disconnected" if client_disconnected
+                            else "completed"
+                        )
+                    )
                     # Log access log for streaming (success or error)
                     if streaming_error:
                         error_type = type(streaming_error).__name__
@@ -731,11 +753,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 model_cache,
                 auth_manager,
                 request_messages=messages_for_tokenizer,
-                request_tools=tools_for_tokenizer
+                request_tools=tools_for_tokenizer,
+                request_audit=request_audit,
             )
             
             await http_client.close()
-            
+            request_audit.log_credit_once(status="completed")
+
             # Log access log for non-streaming success
             logger.info(f"HTTP 200 - POST /v1/chat/completions (non-streaming) - completed")
             

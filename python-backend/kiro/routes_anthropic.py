@@ -51,6 +51,7 @@ from kiro.streaming_anthropic import (
     stream_with_first_token_retry_anthropic,
 )
 from kiro.http_client import KiroHttpClient
+from kiro.request_audit import RequestAudit
 from kiro.utils import generate_conversation_id
 from kiro.tokenizer import estimate_request_tokens
 from kiro.config import WEB_SEARCH_ENABLED
@@ -146,6 +147,7 @@ async def messages(
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/messages (model={request_data.model}, stream={request_data.stream})")
+    request_audit = RequestAudit(protocol="anthropic", client_model=request_data.model)
     
     if anthropic_version:
         logger.debug(f"Anthropic-Version header: {anthropic_version}")
@@ -307,7 +309,11 @@ async def messages(
                 auth_manager = account.auth_manager
                 
                 logger.info("Detected native Anthropic web_search (Path A), routing to MCP API")
-                return await handle_native_web_search(request, request_data, auth_manager, api_format="anthropic")
+                web_search_response = await handle_native_web_search(
+                    request, request_data, auth_manager, api_format="anthropic"
+                )
+                request_audit.log_credit_once(status="completed")
+                return web_search_response
     
     # ==============================================================================
     # Account System: Account System Failover or Legacy Mode
@@ -383,7 +389,8 @@ async def messages(
                 kiro_payload = anthropic_to_kiro(
                     request_data,
                     conversation_id,
-                    profile_arn_for_payload
+                    profile_arn_for_payload,
+                    request_audit=request_audit,
                 )
             except ValueError as e:
                 logger.error(f"Conversion error: {e}")
@@ -457,6 +464,7 @@ async def messages(
                                     request_messages=messages_for_tokenizer,
                                     request_tools=tools_for_tokenizer,
                                     request_system=system_for_tokenizer,
+                                    request_audit=request_audit,
                                 ):
                                     yield chunk
                             except GeneratorExit:
@@ -471,6 +479,13 @@ async def messages(
                                     pass
                             finally:
                                 await http_client.close()
+                                request_audit.log_credit_once(
+                                    status=(
+                                        "failed" if streaming_error
+                                        else "client_disconnected" if client_disconnected
+                                        else "completed"
+                                    )
+                                )
                                 if streaming_error:
                                     error_type = type(streaming_error).__name__
                                     error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
@@ -505,9 +520,11 @@ async def messages(
                             request_messages=messages_for_tokenizer,
                             request_tools=tools_for_tokenizer,
                             request_system=system_for_tokenizer,
+                            request_audit=request_audit,
                         )
                         
                         await http_client.close()
+                        request_audit.log_credit_once(status="completed")
                         logger.info(f"HTTP 200 - POST /v1/messages (non-streaming) - completed")
                         
                         if debug_logger:
@@ -691,7 +708,8 @@ async def messages(
         kiro_payload = anthropic_to_kiro(
             request_data,
             conversation_id,
-            profile_arn_for_payload
+            profile_arn_for_payload,
+            request_audit=request_audit,
         )
     except ValueError as e:
         logger.error(f"Conversion error: {e}")
@@ -815,6 +833,7 @@ async def messages(
                         request_messages=messages_for_tokenizer,
                         request_tools=tools_for_tokenizer,
                         request_system=system_for_tokenizer,
+                        request_audit=request_audit,
                     ):
                         yield chunk
                 except GeneratorExit:
@@ -830,6 +849,13 @@ async def messages(
                         pass
                 finally:
                     await http_client.close()
+                    request_audit.log_credit_once(
+                        status=(
+                            "failed" if streaming_error
+                            else "client_disconnected" if client_disconnected
+                            else "completed"
+                        )
+                    )
                     if streaming_error:
                         error_type = type(streaming_error).__name__
                         error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
@@ -864,10 +890,12 @@ async def messages(
                 request_messages=messages_for_tokenizer,
                 request_tools=tools_for_tokenizer,
                 request_system=system_for_tokenizer,
+                request_audit=request_audit,
             )
             
             await http_client.close()
-            
+            request_audit.log_credit_once(status="completed")
+
             logger.info(f"HTTP 200 - POST /v1/messages (non-streaming) - completed")
             
             if debug_logger:

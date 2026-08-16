@@ -42,6 +42,7 @@ from kiro.config import (
 )
 from kiro.model_resolver import get_model_id_for_kiro
 from kiro.models_openai import ChatMessage, ChatCompletionRequest, Tool
+from kiro.request_audit import RequestAudit
 
 # Import from core - reuse shared logic
 from kiro.converters_core import (
@@ -357,7 +358,8 @@ def extract_thinking_config_from_openai(request: ChatCompletionRequest) -> Think
 def build_kiro_payload(
     request_data: ChatCompletionRequest,
     conversation_id: str,
-    profile_arn: str
+    profile_arn: str,
+    request_audit: Optional[RequestAudit] = None,
 ) -> dict:
     """
     Builds complete payload for Kiro API from OpenAI request.
@@ -369,6 +371,7 @@ def build_kiro_payload(
         request_data: Request in OpenAI format
         conversation_id: Unique conversation ID
         profile_arn: AWS CodeWhisperer profile ARN
+        request_audit: Optional request audit state shared with the response stream.
     
     Returns:
         Payload dictionary for POST request to Kiro API
@@ -406,7 +409,8 @@ def build_kiro_payload(
         tools=unified_tools,
         conversation_id=conversation_id,
         profile_arn=profile_arn,
-        thinking_config=thinking_config
+        thinking_config=thinking_config,
+        request_audit=request_audit,
     )
     
     return result.payload

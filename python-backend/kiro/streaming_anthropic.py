@@ -49,6 +49,7 @@ from kiro.streaming_core import (
 )
 from kiro.tokenizer import count_tokens, estimate_request_tokens
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
+from kiro.request_audit import RequestAudit
 from kiro.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, FAKE_REASONING_HANDLING
 
 if TYPE_CHECKING:
@@ -135,7 +136,8 @@ async def stream_kiro_to_anthropic(
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
     request_system: Optional[Any] = None,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    request_audit: Optional[RequestAudit] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Generator for converting Kiro stream to Anthropic SSE format.
@@ -520,8 +522,10 @@ async def stream_kiro_to_anthropic(
             
             elif event.type == "context_usage" and event.context_usage_percentage is not None:
                 context_usage_percentage = event.context_usage_percentage
-            elif event.type == "usage" and event.usage:
+            elif event.type == "usage" and event.usage is not None:
                 upstream_cache_usage.update(_extract_cache_usage_fields(event.usage))
+                if request_audit is not None:
+                    request_audit.record_metering(event.usage)
         
         # Track completion signals for truncation detection
         stream_completed_normally = context_usage_percentage is not None
@@ -725,7 +729,8 @@ async def collect_anthropic_response(
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    request_system: Optional[Any] = None
+    request_system: Optional[Any] = None,
+    request_audit: Optional[RequestAudit] = None,
 ) -> dict:
     """
     Collect full response from Kiro stream in Anthropic format.
@@ -758,7 +763,7 @@ async def collect_anthropic_response(
         input_tokens = request_token_stats["total_tokens"]
     
     # Collect stream result
-    result = await collect_stream_to_result(response)
+    result = await collect_stream_to_result(response, request_audit=request_audit)
     upstream_cache_usage = _extract_cache_usage_fields(result.usage)
     
     # Build content blocks
@@ -873,7 +878,8 @@ async def stream_with_first_token_retry_anthropic(
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    request_system: Optional[Any] = None
+    request_system: Optional[Any] = None,
+    request_audit: Optional[RequestAudit] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Streaming with automatic retry on first token timeout for Anthropic API.
@@ -934,6 +940,7 @@ async def stream_with_first_token_retry_anthropic(
             request_messages=request_messages,
             request_tools=request_tools,
             request_system=request_system,
+            request_audit=request_audit,
         ):
             yield chunk
     

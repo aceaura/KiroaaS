@@ -37,6 +37,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
+from kiro.request_audit import RequestAudit
 from kiro.utils import generate_completion_id
 from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
@@ -78,7 +79,8 @@ async def stream_kiro_to_openai_internal(
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    request_audit: Optional[RequestAudit] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Internal generator for converting Kiro stream to OpenAI format.
@@ -262,8 +264,10 @@ async def stream_kiro_to_openai_internal(
                 # Collect tool calls from stream (normal tools, not web_search)
                 tool_calls_from_stream.append(event.tool_use)
             
-            elif event.type == "usage" and event.usage:
+            elif event.type == "usage" and event.usage is not None:
                 metering_data = event.usage
+                if request_audit is not None:
+                    request_audit.record_metering(event.usage)
             
             elif event.type == "context_usage" and event.context_usage_percentage is not None:
                 context_usage_percentage = event.context_usage_percentage
@@ -402,7 +406,7 @@ async def stream_kiro_to_openai_internal(
             }
         }
         
-        if metering_data:
+        if metering_data is not None:
             final_chunk["usage"]["credits_used"] = metering_data
         
         # Log final token values being sent to client
@@ -454,7 +458,8 @@ async def stream_kiro_to_openai(
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    request_audit: Optional[RequestAudit] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Generator for converting Kiro stream to OpenAI format.
@@ -477,7 +482,8 @@ async def stream_kiro_to_openai(
     async for chunk in stream_kiro_to_openai_internal(
         client, response, model, model_cache, auth_manager,
         request_messages=request_messages,
-        request_tools=request_tools
+        request_tools=request_tools,
+        request_audit=request_audit,
     ):
         yield chunk
 
@@ -492,7 +498,8 @@ async def stream_with_first_token_retry(
     max_retries: int = FIRST_TOKEN_MAX_RETRIES,
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    request_audit: Optional[RequestAudit] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Streaming with automatic retry on first token timeout.
@@ -557,7 +564,8 @@ async def stream_with_first_token_retry(
             auth_manager,
             first_token_timeout=first_token_timeout,
             request_messages=request_messages,
-            request_tools=request_tools
+            request_tools=request_tools,
+            request_audit=request_audit,
         ):
             yield chunk
     
@@ -580,7 +588,8 @@ async def collect_stream_response(
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    request_audit: Optional[RequestAudit] = None,
 ) -> dict:
     """
     Collect full response from streaming stream.
@@ -614,7 +623,8 @@ async def collect_stream_response(
         model_cache,
         auth_manager,
         request_messages=request_messages,
-        request_tools=request_tools
+        request_tools=request_tools,
+        request_audit=request_audit,
     ):
         if not chunk_str.startswith("data:"):
             continue
