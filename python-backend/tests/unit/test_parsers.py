@@ -525,6 +525,68 @@ class TestAwsEventStreamParserFeed:
         assert events[0]["type"] == "context_usage"
         assert events[0]["data"] == 25.5
 
+    def test_fragmented_tool_input_frames_accumulate(self, aws_event_parser):
+        """
+        What it does: Verifies toolUseEvent input fragments that also carry
+            "name" accumulate into one complete tool call.
+        Goal: Regression test for the Kiro GPT channel, which streams the
+            tool input as many frames that ALL contain name+toolUseId; the
+            old name-first dispatch restarted the call per fragment and the
+            client received empty/2-byte arguments.
+        """
+        print("Setup: start / fragment / stop frames as seen in production...")
+        tid = "call_frag_1"
+        frames = [
+            _aws_event_frame("toolUseEvent", {"name": "Read", "toolUseId": tid}),
+        ]
+        for frag in ['{"', "file", "_path", '":', '"/', "etc", "/", "hostname", '"}']:
+            frames.append(_aws_event_frame(
+                "toolUseEvent", {"input": frag, "name": "Read", "toolUseId": tid},
+            ))
+        frames.append(_aws_event_frame(
+            "toolUseEvent", {"name": "Read", "stop": True, "toolUseId": tid},
+        ))
+
+        print("Action: Feeding frames...")
+        for frame in frames:
+            aws_event_parser.feed(frame)
+
+        calls = aws_event_parser.get_tool_calls()
+        print(f"Result: {calls}")
+        assert len(calls) == 1
+        assert calls[0]["id"] == tid
+        assert calls[0]["function"]["name"] == "Read"
+        assert json.loads(calls[0]["function"]["arguments"]) == {
+            "file_path": "/etc/hostname"
+        }
+
+    def test_second_tool_call_after_fragments_starts_new(self, aws_event_parser):
+        """
+        What it does: Verifies a fragment frame with a different toolUseId
+            starts a new call instead of appending to the previous one.
+        Goal: Ensure the same-id guard does not merge two distinct calls.
+        """
+        print("Setup: two calls, second arrives as name+input frames...")
+        for frag in ['{"', "command", '":', '"ls', '"}']:
+            aws_event_parser.feed(_aws_event_frame(
+                "toolUseEvent", {"input": frag, "name": "Bash", "toolUseId": "call_a"},
+            ))
+        aws_event_parser.feed(_aws_event_frame(
+            "toolUseEvent", {"name": "Bash", "stop": True, "toolUseId": "call_a"},
+        ))
+        aws_event_parser.feed(_aws_event_frame(
+            "toolUseEvent", {"input": '{"command":"pwd"}', "name": "Bash", "toolUseId": "call_b"},
+        ))
+        aws_event_parser.feed(_aws_event_frame(
+            "toolUseEvent", {"name": "Bash", "stop": True, "toolUseId": "call_b"},
+        ))
+
+        calls = aws_event_parser.get_tool_calls()
+        print(f"Result: {calls}")
+        assert len(calls) == 2
+        assert json.loads(calls[0]["function"]["arguments"]) == {"command": "ls"}
+        assert json.loads(calls[1]["function"]["arguments"]) == {"command": "pwd"}
+
     def test_parses_split_aws_frames_by_event_type(self, aws_event_parser):
         content = _aws_event_frame(
             "assistantResponseEvent",

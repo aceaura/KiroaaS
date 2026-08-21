@@ -402,12 +402,28 @@ class AwsEventStreamParser:
         if event_type == "contextUsageEvent":
             return self._process_event(data, "context_usage")
         if event_type == "toolUseEvent":
+            # Kiro streams tool inputs as a sequence of input fragments that
+            # ALSO carry "name" and "toolUseId" on every frame, so dispatching
+            # on "name" first would restart the call per fragment and drop all
+            # but the last piece (observed with the GPT channel). Route by
+            # "input" first: a fragment for the active call appends, anything
+            # else starts a new call.
+            if "input" in data:
+                same_call = (
+                    self.current_tool_call is not None
+                    and data.get("toolUseId") == self.current_tool_call.get("id")
+                )
+                if same_call:
+                    self._process_event(data, "tool_input")
+                else:
+                    self._process_event(data, "tool_start")
+                if data.get("stop"):
+                    self._process_event(data, "tool_stop")
+                return None
+            if data.get("stop"):
+                return self._process_event(data, "tool_stop")
             if "name" in data:
                 return self._process_event(data, "tool_start")
-            if "input" in data:
-                return self._process_event(data, "tool_input")
-            if "stop" in data:
-                return self._process_event(data, "tool_stop")
         return None
 
     def _feed_text(self, chunk: bytes) -> List[Dict[str, Any]]:
