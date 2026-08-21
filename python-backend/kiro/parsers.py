@@ -91,6 +91,134 @@ def find_matching_brace(text: str, start_pos: int) -> int:
     return -1
 
 
+def repair_truncated_json(json_str: str) -> Optional[str]:
+    """
+    Attempts to repair JSON that was truncated mid-stream by closing any
+    open strings, objects, and arrays.
+
+    The Kiro GPT channel occasionally cuts large tool-call arguments short
+    (output budget or API limits). When the payload only lost its trailing
+    closers -- or was cut inside a string or right after a member -- the
+    missing closers can be appended (in correct stack order) to yield valid
+    JSON that preserves everything that was received.
+
+    Args:
+        json_str: Raw JSON string that failed to parse
+
+    Returns:
+        Repaired JSON string, or None when the payload cannot be repaired
+        safely (mismatched closers, unrecoverable structure, ...).
+    """
+    if not json_str or not json_str.strip():
+        return None
+
+    for candidate in _truncation_repair_candidates(json_str):
+        closed = _close_json_containers(candidate)
+        if closed is None:
+            continue
+        try:
+            json.loads(closed)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        return closed
+    return None
+
+
+def _scan_json_state(text: str):
+    """
+    Scans JSON text tracking container stack, string state, and anchors.
+
+    Returns None on a mismatched closer (not safely repairable), otherwise
+    (stack, in_string, escape, last_comma, string_start) where:
+    - stack holds expected closers, innermost last ('}' / ']')
+    - in_string/escape describe state at end of text
+    - last_comma is the index of the last ',' outside any string
+    - string_start is the opening-quote index of a string still open at the
+      end of text (-1 when no string is open)
+    """
+    stack: List[str] = []
+    in_string = False
+    escape = False
+    string_start = -1
+    last_comma = -1
+    for i, ch in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            string_start = i
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in "}]":
+            if not stack or stack[-1] != ch:
+                return None
+            stack.pop()
+        elif ch == ",":
+            last_comma = i
+    return stack, in_string, escape, last_comma, string_start
+
+
+def _close_json_containers(text: str) -> Optional[str]:
+    """
+    Appends the closers needed to balance any open containers in text.
+
+    A string still open at the end is closed first (a trailing escape
+    backslash is dropped so it cannot escape the closing quote). Returns
+    None when text contains a mismatched closer.
+    """
+    state = _scan_json_state(text)
+    if state is None:
+        return None
+    stack, in_string, escape, _comma, _start = state
+    suffix = ""
+    if in_string:
+        if escape:
+            text = text[:-1]
+        suffix = '"'
+    return text + suffix + "".join(reversed(stack))
+
+
+def _truncation_repair_candidates(json_str: str) -> List[str]:
+    """
+    Builds repair candidates for truncated JSON, most-complete first.
+
+    Candidate order: the full text, the text without dangling separators
+    (',' / ':' tails), and the text cut back to the last complete member
+    boundary (dropping a dangling partial string or key).
+    """
+    s = json_str.rstrip()
+    if not s:
+        return []
+    candidates = [s]
+
+    stripped = s
+    while stripped and stripped[-1] in ",:":
+        stripped = stripped[:-1].rstrip()
+    if stripped and stripped != s:
+        candidates.append(stripped)
+
+    state = _scan_json_state(s)
+    if state is not None:
+        _stack, in_string, _escape, last_comma, string_start = state
+        if in_string and string_start > 0:
+            head = s[:string_start].rstrip()
+            while head and head[-1] in ",:":
+                head = head[:-1].rstrip()
+            if head:
+                candidates.append(head)
+        elif last_comma > 0:
+            candidates.append(s[:last_comma])
+    return candidates
+
+
 def parse_bracket_tool_calls(response_text: str) -> List[Dict[str, Any]]:
     """
     Parses tool calls in [Called func_name with args: {...}] format.
@@ -581,31 +709,42 @@ class AwsEventStreamParser:
                     self.current_tool_call['function']['arguments'] = json.dumps(parsed)
                     logger.debug(f"Tool '{tool_name}' arguments parsed successfully: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed)}")
                 except json.JSONDecodeError as e:
-                    # Analyze the failure to provide better diagnostics
-                    truncation_info = self._diagnose_json_truncation(args)
-                    
-                    if truncation_info["is_truncated"]:
-                        # Mark for recovery system
-                        self.current_tool_call['_truncation_detected'] = True
-                        self.current_tool_call['_truncation_info'] = truncation_info
-                        
-                        # Check if recovery is enabled
-                        from kiro.config import TRUNCATION_RECOVERY
-                        tool_id = self.current_tool_call.get('id', 'unknown')
-                        
-                        # Clear error message: this is Kiro API's fault, not ours
-                        logger.error(
-                            f"Tool call truncated by Kiro API: "
-                            f"tool='{tool_name}', id={tool_id}, size={truncation_info['size_bytes']} bytes, "
-                            f"reason={truncation_info['reason']}. "
-                            f"This is a Kiro API limitation. "
-                            f"{'Model will be notified automatically about truncation.' if TRUNCATION_RECOVERY else 'Set TRUNCATION_RECOVERY=true in .env to auto-notify model about truncation.'}"
+                    # First try to repair the truncated JSON: when only the
+                    # trailing closers (or one dangling member) were lost,
+                    # the call is still fully usable for the client.
+                    repaired = repair_truncated_json(args)
+                    if repaired is not None:
+                        logger.warning(
+                            f"Repaired truncated arguments for tool '{tool_name}': "
+                            f"received {len(args)} bytes, repaired {len(repaired)} bytes"
                         )
+                        self.current_tool_call['function']['arguments'] = repaired
                     else:
-                        # Regular JSON parse error
-                        logger.warning(f"Failed to parse tool '{tool_name}' arguments: {e}. Raw: {args[:200]}")
-                    
-                    self.current_tool_call['function']['arguments'] = "{}"
+                        # Analyze the failure to provide better diagnostics
+                        truncation_info = self._diagnose_json_truncation(args)
+
+                        if truncation_info["is_truncated"]:
+                            # Mark for recovery system
+                            self.current_tool_call['_truncation_detected'] = True
+                            self.current_tool_call['_truncation_info'] = truncation_info
+
+                            # Check if recovery is enabled
+                            from kiro.config import TRUNCATION_RECOVERY
+                            tool_id = self.current_tool_call.get('id', 'unknown')
+
+                            # Clear error message: this is Kiro API's fault, not ours
+                            logger.error(
+                                f"Tool call truncated by Kiro API: "
+                                f"tool='{tool_name}', id={tool_id}, size={truncation_info['size_bytes']} bytes, "
+                                f"reason={truncation_info['reason']}. "
+                                f"This is a Kiro API limitation. "
+                                f"{'Model will be notified automatically about truncation.' if TRUNCATION_RECOVERY else 'Set TRUNCATION_RECOVERY=true in .env to auto-notify model about truncation.'}"
+                            )
+                        else:
+                            # Regular JSON parse error
+                            logger.warning(f"Failed to parse tool '{tool_name}' arguments: {e}. Raw: {args[:200]}")
+
+                        self.current_tool_call['function']['arguments'] = "{}"
             else:
                 # Empty string - use empty object
                 # This is normal behavior for duplicate tool calls from Kiro
