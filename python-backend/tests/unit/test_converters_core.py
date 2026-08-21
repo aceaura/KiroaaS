@@ -28,6 +28,7 @@ from kiro.converters_core import (
     strip_all_tool_content,
     build_kiro_history,
     build_kiro_payload,
+    build_tool_choice_directive,
     process_tools_with_long_descriptions,
     inject_thinking_tags,
     extract_tool_results_from_content,
@@ -6664,3 +6665,53 @@ class TestEffortDecisionLogging:
             "SYSTEM_SECRET", "MESSAGE_SECRET", "CONVERSATION_SECRET", "PROFILE_SECRET"
         ):
             assert secret not in log
+
+
+class TestBuildToolChoiceDirective:
+    """Tests for build_tool_choice_directive (tool_choice enforcement)."""
+
+    def test_none_returns_empty(self):
+        assert build_tool_choice_directive(None) == ""
+
+    def test_auto_string_returns_empty(self):
+        assert build_tool_choice_directive("auto") == ""
+
+    def test_auto_dict_returns_empty(self):
+        assert build_tool_choice_directive({"type": "auto"}) == ""
+
+    def test_required_string_forces_any_tool(self):
+        d = build_tool_choice_directive("required")
+        assert "MUST call at least one tool" in d
+
+    def test_any_string_forces_any_tool(self):
+        d = build_tool_choice_directive("any")
+        assert "MUST call at least one tool" in d
+
+    def test_openai_named_function(self):
+        d = build_tool_choice_directive(
+            {"type": "function", "function": {"name": "Read"}})
+        assert "'Read'" in d and "MUST call the tool named" in d
+
+    def test_anthropic_named_tool(self):
+        d = build_tool_choice_directive({"type": "tool", "name": "Bash"})
+        assert "'Bash'" in d and "MUST call the tool named" in d
+
+    def test_anthropic_any_type(self):
+        d = build_tool_choice_directive({"type": "any"})
+        assert "MUST call at least one tool" in d
+
+    def test_none_string_forbids_tools(self):
+        d = build_tool_choice_directive("none")
+        assert "must NOT call any tool" in d
+
+    def test_none_type_forbids_tools(self):
+        d = build_tool_choice_directive({"type": "none"})
+        assert "must NOT call any tool" in d
+
+    def test_named_without_name_returns_empty(self):
+        assert build_tool_choice_directive({"type": "tool"}) == ""
+        assert build_tool_choice_directive({"type": "function", "function": {}}) == ""
+
+    def test_unknown_shape_returns_empty(self):
+        assert build_tool_choice_directive(42) == ""
+        assert build_tool_choice_directive({"type": "weird"}) == ""

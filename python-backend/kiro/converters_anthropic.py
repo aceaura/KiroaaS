@@ -41,6 +41,7 @@ from kiro.converters_core import (
     UnifiedTool,
     ThinkingConfig,
     build_kiro_payload,
+    build_tool_choice_directive,
     coerce_tool_input_to_dict,
     extract_text_content,
     extract_images_from_content,
@@ -490,6 +491,11 @@ def anthropic_to_kiro(
     # System prompt is already separate in Anthropic format!
     # It can be a string or list of content blocks (for prompt caching)
     system_prompt = extract_system_prompt(request.system)
+
+    # Enforce tool_choice via a system-prompt directive (Kiro has no toolChoice)
+    tool_choice_directive = build_tool_choice_directive(request.tool_choice)
+    if tool_choice_directive:
+        system_prompt = system_prompt + tool_choice_directive if system_prompt else tool_choice_directive.strip()
 
     # Get model ID for Kiro API (normalizes + resolves hidden models)
     # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid

@@ -1459,6 +1459,72 @@ def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Di
 # Main Payload Building
 # ==================================================================================================
 
+def build_tool_choice_directive(tool_choice: Any) -> str:
+    """
+    Builds a system-prompt directive that enforces the client's tool_choice.
+
+    The Kiro upstream API has no toolChoice equivalent, so forced tool
+    selection (OpenAI "required" / named function, Anthropic "any" / "tool")
+    is approximated with an explicit per-request instruction. Returns an
+    empty string when nothing must be enforced ("auto", None, unknown).
+
+    Args:
+        tool_choice: Raw tool_choice value from either API dialect
+            (str or dict, OpenAI or Anthropic shape)
+
+    Returns:
+        Directive text to append to the system prompt ("" when not needed)
+    """
+    if not tool_choice:
+        return ""
+
+    must_call: Optional[str] = None  # None means "any tool", str means named
+    forbid = False
+
+    if isinstance(tool_choice, str):
+        if tool_choice in ("required", "any"):
+            must_call = None
+        elif tool_choice == "none":
+            forbid = True
+        else:
+            return ""  # "auto" or unknown
+    elif isinstance(tool_choice, dict):
+        tc_type = tool_choice.get("type")
+        if tc_type == "tool":
+            name = tool_choice.get("name")
+            if not name:
+                return ""
+            must_call = name
+        elif tc_type == "function":
+            name = (tool_choice.get("function") or {}).get("name")
+            if not name:
+                return ""
+            must_call = name
+        elif tc_type in ("required", "any"):
+            must_call = None
+        elif tc_type == "none":
+            forbid = True
+        else:
+            return ""  # "auto" or unknown
+    else:
+        return ""
+
+    if forbid:
+        return (
+            "\n\n[Tool Policy] For THIS response you must NOT call any tool. "
+            "Reply with plain content only."
+        )
+    if must_call is None:
+        return (
+            "\n\n[Tool Policy] For THIS response you MUST call at least one tool. "
+            "Do not reply with text only."
+        )
+    return (
+        f"\n\n[Tool Policy] For THIS response you MUST call the tool named "
+        f"'{must_call}'. Do not reply with text only."
+    )
+
+
 def build_kiro_payload(
     messages: List[UnifiedMessage],
     system_prompt: str,
