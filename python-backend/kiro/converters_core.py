@@ -790,6 +790,44 @@ def extract_tool_results_from_content(content: Any) -> List[Dict[str, Any]]:
     return tool_results
 
 
+def coerce_tool_input_to_dict(raw: Any) -> Dict[str, Any]:
+    """
+    Coerces a tool-call input/arguments value to a dict for the Kiro API.
+
+    Kiro requires tool inputs to be JSON objects, but OpenAI-format
+    ``arguments`` arrive as raw strings and bridged GPT conversations can
+    carry strings that are not valid JSON at all (e.g. ``":"``). Valid
+    JSON objects are parsed as-is; anything else degrades to an empty dict
+    with a warning instead of raising and failing the whole request.
+
+    Args:
+        raw: Tool input value of any type (dict, str, other)
+
+    Returns:
+        A dict suitable for the Kiro API
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return {}
+        try:
+            parsed = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(
+                f"Tool input string is not valid JSON, coercing to empty dict: {stripped[:80]!r}"
+            )
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        logger.warning(
+            f"Tool input JSON is not an object, coercing to empty dict: {stripped[:80]!r}"
+        )
+        return {}
+    return raw if raw else {}
+
+
 def extract_tool_uses_from_message(
     content: Any,
     tool_calls: Optional[List[Dict[str, Any]]] = None
@@ -816,27 +854,25 @@ def extract_tool_uses_from_message(
             if isinstance(tc, dict):
                 func = tc.get("function", {})
                 arguments = func.get("arguments", "{}")
-                # Handle both string (OpenAI) and dict (Anthropic unified) formats
-                if isinstance(arguments, str):
-                    input_data = json.loads(arguments) if arguments else {}
-                else:
-                    input_data = arguments if arguments else {}
+                # Handle both string (OpenAI) and dict (Anthropic unified) formats;
+                # malformed strings degrade to {} instead of raising
+                input_data = coerce_tool_input_to_dict(arguments)
                 tool_uses.append({
                     "name": func.get("name", ""),
                     "input": input_data,
                     "toolUseId": tc.get("id", "")
                 })
-    
+
     # From content blocks (Anthropic format)
     if isinstance(content, list):
         for item in content:
             if isinstance(item, dict) and item.get("type") == "tool_use":
                 tool_uses.append({
                     "name": item.get("name", ""),
-                    "input": item.get("input", {}),
+                    "input": coerce_tool_input_to_dict(item.get("input", {})),
                     "toolUseId": item.get("id", "")
                 })
-    
+
     return tool_uses
 
 

@@ -867,9 +867,95 @@ class TestToolUseContentBlock:
             "filters": ["active", "recent"]
         }
         block = ToolUseContentBlock(id="call_1", name="search", input=complex_input)
-        
+
         print(f"Comparing input: Got {block.input}")
         assert block.input == complex_input
+
+    def test_string_json_input_coerced_to_dict(self):
+        """
+        What it does: Verifies a string input holding valid JSON is parsed.
+        Purpose: OpenAI-bridged tool calls can carry arguments as a raw
+            JSON string; the request must still validate.
+        """
+        print("Setup: Creating ToolUseContentBlock with JSON-string input...")
+        block = ToolUseContentBlock(
+            id="call_1", name="Bash", input='{"command": "ls"}'
+        )
+
+        print(f"Comparing input: Got {block.input}")
+        assert block.input == {"command": "ls"}
+
+    def test_invalid_string_input_coerced_to_empty_dict(self):
+        """
+        What it does: Verifies an unparseable string input degrades to {}.
+        Purpose: Real GPT conversations surfaced input=":" which used to
+            reject the whole request with a 422.
+        """
+        print("Setup: Creating ToolUseContentBlock with input=':'...")
+        block = ToolUseContentBlock(id="call_1", name="Bash", input=":")
+
+        print(f"Comparing input: Expected {{}}, Got {block.input}")
+        assert block.input == {}
+
+    def test_empty_string_input_coerced_to_empty_dict(self):
+        """
+        What it does: Verifies an empty/whitespace string input becomes {}.
+        Purpose: Empty argument strings must not fail validation.
+        """
+        for raw in ("", "   "):
+            block = ToolUseContentBlock(id="call_1", name="Bash", input=raw)
+            assert block.input == {}
+
+    def test_non_object_json_input_coerced_to_empty_dict(self):
+        """
+        What it does: Verifies valid JSON that is not an object becomes {}.
+        Purpose: Kiro requires object inputs; arrays/scalars degrade safely.
+        """
+        for raw in ("[1, 2]", '"text"', "42"):
+            block = ToolUseContentBlock(id="call_1", name="Bash", input=raw)
+            assert block.input == {}
+
+    def test_full_request_with_string_tool_input(self):
+        """
+        What it does: Validates a full AnthropicMessagesRequest whose
+            assistant history contains a tool_use block with input=":".
+        Purpose: Regression test for the production 422 that killed
+            tool-chain conversations on the anthropic endpoint.
+        """
+        print("Setup: Building AnthropicMessagesRequest with tool_use history...")
+        request = AnthropicMessagesRequest(
+            model="gpt-5.6-sol",
+            max_tokens=32,
+            messages=[
+                {"role": "user", "content": "run ls"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "running"},
+                        {
+                            "type": "tool_use",
+                            "id": "call_d327001f",
+                            "name": "Bash",
+                            "input": ":",
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_d327001f",
+                            "content": "ok",
+                        }
+                    ],
+                },
+            ],
+        )
+
+        tool_block = request.messages[1].content[1]
+        print(f"Comparing coerced input: Expected {{}}, Got {tool_block.input}")
+        assert tool_block.input == {}
 
 
 # ==================================================================================================

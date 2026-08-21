@@ -41,6 +41,7 @@ from kiro.converters_core import (
     UnifiedTool,
     ThinkingConfig,
     build_kiro_payload,
+    coerce_tool_input_to_dict,
     extract_text_content,
     extract_images_from_content,
 )
@@ -246,9 +247,9 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
                     "type": "function",
                     "function": {
                         "name": tool_name,
-                        "arguments": tool_input
-                        if isinstance(tool_input, str)
-                        else tool_input,
+                        # Raw-dict paths bypass Pydantic coercion, so normalize
+                        # string inputs here as well.
+                        "arguments": coerce_tool_input_to_dict(tool_input),
                     },
                 }
             )

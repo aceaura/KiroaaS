@@ -32,6 +32,7 @@ from kiro.converters_core import (
     inject_thinking_tags,
     extract_tool_results_from_content,
     extract_tool_uses_from_message,
+    coerce_tool_input_to_dict,
     sanitize_json_schema,
     convert_tools_to_kiro_format,
     convert_tool_results_to_kiro_format,
@@ -3203,9 +3204,103 @@ class TestExtractToolUses:
         
         print("Action: Extracting tool uses...")
         result = extract_tool_uses_from_message(content=content, tool_calls=tool_calls)
-        
+
         print(f"Result: {result}")
         assert len(result) == 2
+
+    def test_malformed_string_arguments_degrade_to_empty_dict(self):
+        """
+        What it does: Verifies unparseable OpenAI arguments string degrades to {}.
+        Purpose: Real GPT traffic surfaced arguments=":" which used to raise
+            json.JSONDecodeError and fail the whole request.
+        """
+        print("Setup: tool_calls with arguments=':'...")
+        tool_calls = [{
+            "id": "call_1",
+            "function": {"name": "Bash", "arguments": ":"}
+        }]
+
+        print("Action: Extracting tool uses...")
+        result = extract_tool_uses_from_message(content="", tool_calls=tool_calls)
+
+        print(f"Result: {result}")
+        assert len(result) == 1
+        assert result[0]["input"] == {}
+        assert result[0]["name"] == "Bash"
+
+    def test_string_arguments_parsed_when_valid_json(self):
+        """
+        What it does: Verifies valid JSON string arguments are parsed to dict.
+        Purpose: Ensure the normal OpenAI string-arguments path still works.
+        """
+        print("Setup: tool_calls with valid JSON string arguments...")
+        tool_calls = [{
+            "id": "call_1",
+            "function": {"name": "Bash", "arguments": '{"command": "ls -la"}'}
+        }]
+
+        print("Action: Extracting tool uses...")
+        result = extract_tool_uses_from_message(content="", tool_calls=tool_calls)
+
+        print(f"Result: {result}")
+        assert result[0]["input"] == {"command": "ls -la"}
+
+    def test_content_block_string_input_coerced(self):
+        """
+        What it does: Verifies a tool_use content block with string input is coerced.
+        Purpose: Dict-based paths bypass Pydantic coercion; the extractor
+            must normalize on its own.
+        """
+        print("Setup: content tool_use block with input=':'...")
+        content = [{
+            "type": "tool_use",
+            "id": "call_9",
+            "name": "Bash",
+            "input": ":"
+        }]
+
+        print("Action: Extracting tool uses...")
+        result = extract_tool_uses_from_message(content=content, tool_calls=None)
+
+        print(f"Result: {result}")
+        assert result[0]["input"] == {}
+
+
+# ==================================================================================================
+# Tests for coerce_tool_input_to_dict
+# ==================================================================================================
+
+class TestCoerceToolInputToDict:
+    """Tests for coerce_tool_input_to_dict helper."""
+
+    def test_dict_passthrough(self):
+        """What it does: Dicts pass through unchanged."""
+        assert coerce_tool_input_to_dict({"a": 1}) == {"a": 1}
+        assert coerce_tool_input_to_dict({}) == {}
+
+    def test_valid_json_object_string(self):
+        """What it does: JSON object strings are parsed."""
+        assert coerce_tool_input_to_dict('{"a": 1}') == {"a": 1}
+
+    def test_invalid_json_string(self):
+        """What it does: Invalid JSON strings degrade to {}."""
+        assert coerce_tool_input_to_dict(":") == {}
+        assert coerce_tool_input_to_dict("not json at all") == {}
+
+    def test_empty_and_whitespace_strings(self):
+        """What it does: Empty/whitespace strings become {}."""
+        assert coerce_tool_input_to_dict("") == {}
+        assert coerce_tool_input_to_dict("   ") == {}
+
+    def test_non_object_json(self):
+        """What it does: Valid JSON that is not an object becomes {}."""
+        assert coerce_tool_input_to_dict("[1, 2]") == {}
+        assert coerce_tool_input_to_dict("42") == {}
+        assert coerce_tool_input_to_dict('"str"') == {}
+
+    def test_none_and_falsy(self):
+        """What it does: None/other falsy values become {}."""
+        assert coerce_tool_input_to_dict(None) == {}
 
 
 # ==================================================================================================
