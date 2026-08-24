@@ -25,6 +25,9 @@ from kiro.converters_anthropic import (
     convert_anthropic_tools,
     anthropic_to_kiro,
     extract_thinking_config_from_anthropic,
+    is_gpt_model,
+    has_unrecovered_edit_mismatch,
+    build_gpt_edit_recovery_directive,
 )
 from kiro.converters_core import UnifiedMessage, UnifiedTool
 from kiro.models_anthropic import (
@@ -1437,6 +1440,138 @@ class TestConvertAnthropicTools:
         assert result[0].description is None
 
 
+# ==================================================================================================
+# Tests for GPT Edit recovery guidance
+# ==================================================================================================
+
+
+class TestGptEditRecovery:
+    """Tests for Anthropic-side Claude Code Edit recovery guidance."""
+
+    @staticmethod
+    def _messages(result_text="String to replace not found in file"):
+        return [
+            AnthropicMessage(role="user", content="Edit the file"),
+            AnthropicMessage(
+                role="assistant",
+                content=[
+                    {
+                        "type": "tool_use",
+                        "id": "edit-1",
+                        "name": "Edit",
+                        "input": {"file_path": "a.txt", "old_string": "old"},
+                    }
+                ],
+            ),
+            AnthropicMessage(
+                role="user",
+                content=[
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "edit-1",
+                        "content": result_text,
+                        "is_error": True,
+                    }
+                ],
+            ),
+        ]
+
+    def test_gpt_model_detection_is_narrow(self):
+        assert is_gpt_model("gpt-5.6-luna")
+        assert is_gpt_model(" GPT_5 ")
+        assert not is_gpt_model("claude-sonnet-4.5")
+        assert not is_gpt_model(None)
+
+    def test_detects_latest_edit_mismatch(self):
+        assert has_unrecovered_edit_mismatch(self._messages())
+
+    def test_does_not_trigger_for_non_edit_tool(self):
+        messages = self._messages()
+        messages[1] = AnthropicMessage(
+            role="assistant",
+            content=[
+                {"type": "tool_use", "id": "read-1", "name": "Read", "input": {}}
+            ],
+        )
+        messages[2] = AnthropicMessage(
+            role="user",
+            content=[
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "read-1",
+                    "content": "String to replace not found in file",
+                    "is_error": True,
+                }
+            ],
+        )
+        assert not has_unrecovered_edit_mismatch(messages)
+
+    def test_later_read_clears_pending_failure(self):
+        messages = self._messages()
+        messages.extend(
+            [
+                AnthropicMessage(
+                    role="assistant",
+                    content=[
+                        {"type": "tool_use", "id": "read-1", "name": "Read", "input": {}}
+                    ],
+                ),
+                AnthropicMessage(
+                    role="user",
+                    content=[
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "read-1",
+                            "content": "latest file contents",
+                        }
+                    ],
+                ),
+            ]
+        )
+        assert not has_unrecovered_edit_mismatch(messages)
+
+    def test_policy_only_for_gpt_and_notice_only_once(self):
+        messages = self._messages()
+        directive = build_gpt_edit_recovery_directive("gpt-5.6-luna", messages)
+        assert "Claude Code Edit Recovery" in directive
+        assert "[Edit Recovery Notice]" in directive
+        assert build_gpt_edit_recovery_directive("claude-sonnet-4.5", messages) == ""
+
+        recovered = messages + [
+            AnthropicMessage(
+                role="assistant",
+                content=[
+                    {"type": "tool_use", "id": "read-1", "name": "Read", "input": {}}
+                ],
+            )
+        ]
+        recovered_directive = build_gpt_edit_recovery_directive("gpt-5.6-luna", recovered)
+        assert "Claude Code Edit Recovery" in recovered_directive
+        assert "[Edit Recovery Notice]" not in recovered_directive
+
+    def test_anthropic_payload_contains_gpt_recovery_directive(self):
+        request = AnthropicMessagesRequest(
+            model="gpt-5.6-luna",
+            messages=self._messages(),
+            max_tokens=1024,
+            system="Existing system instructions.",
+        )
+        with patch(
+            "kiro.converters_anthropic.get_model_id_for_kiro",
+            return_value="gpt-5.6-luna",
+        ):
+            with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
+                result = anthropic_to_kiro(request, "conv-edit", "arn:aws:test")
+
+        history = result["conversationState"].get("history", [])
+        history_text = "\n".join(
+            item.get("userInputMessage", {}).get("content", "")
+            for item in history
+            if "userInputMessage" in item
+        )
+        assert "Existing system instructions." in history_text
+        assert "Claude Code Edit Recovery" in history_text
+        assert "[Edit Recovery Notice]" in history_text
 # ==================================================================================================
 # Tests for anthropic_to_kiro
 # ==================================================================================================

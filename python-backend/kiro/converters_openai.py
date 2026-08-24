@@ -52,6 +52,7 @@ from kiro.converters_core import (
     UnifiedTool,
     ThinkingConfig,
     build_kiro_payload as core_build_kiro_payload,
+    build_tool_choice_directive,
 )
 
 
@@ -381,6 +382,11 @@ def build_kiro_payload(
     """
     # Convert messages to unified format
     system_prompt, unified_messages = convert_openai_messages_to_unified(request_data.messages)
+
+    # Enforce tool_choice via a system-prompt directive (Kiro has no toolChoice)
+    tool_choice_directive = build_tool_choice_directive(request_data.tool_choice)
+    if tool_choice_directive:
+        system_prompt = system_prompt + tool_choice_directive if system_prompt else tool_choice_directive.strip()
     
     # Convert tools to unified format
     unified_tools = convert_openai_tools_to_unified(request_data.tools)

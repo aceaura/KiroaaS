@@ -15,7 +15,8 @@ from kiro.parsers import (
     AwsEventStreamParser,
     find_matching_brace,
     parse_bracket_tool_calls,
-    deduplicate_tool_calls
+    deduplicate_tool_calls,
+    repair_truncated_json
 )
 
 
@@ -524,6 +525,68 @@ class TestAwsEventStreamParserFeed:
         assert len(events) == 1
         assert events[0]["type"] == "context_usage"
         assert events[0]["data"] == 25.5
+
+    def test_fragmented_tool_input_frames_accumulate(self, aws_event_parser):
+        """
+        What it does: Verifies toolUseEvent input fragments that also carry
+            "name" accumulate into one complete tool call.
+        Goal: Regression test for the Kiro GPT channel, which streams the
+            tool input as many frames that ALL contain name+toolUseId; the
+            old name-first dispatch restarted the call per fragment and the
+            client received empty/2-byte arguments.
+        """
+        print("Setup: start / fragment / stop frames as seen in production...")
+        tid = "call_frag_1"
+        frames = [
+            _aws_event_frame("toolUseEvent", {"name": "Read", "toolUseId": tid}),
+        ]
+        for frag in ['{"', "file", "_path", '":', '"/', "etc", "/", "hostname", '"}']:
+            frames.append(_aws_event_frame(
+                "toolUseEvent", {"input": frag, "name": "Read", "toolUseId": tid},
+            ))
+        frames.append(_aws_event_frame(
+            "toolUseEvent", {"name": "Read", "stop": True, "toolUseId": tid},
+        ))
+
+        print("Action: Feeding frames...")
+        for frame in frames:
+            aws_event_parser.feed(frame)
+
+        calls = aws_event_parser.get_tool_calls()
+        print(f"Result: {calls}")
+        assert len(calls) == 1
+        assert calls[0]["id"] == tid
+        assert calls[0]["function"]["name"] == "Read"
+        assert json.loads(calls[0]["function"]["arguments"]) == {
+            "file_path": "/etc/hostname"
+        }
+
+    def test_second_tool_call_after_fragments_starts_new(self, aws_event_parser):
+        """
+        What it does: Verifies a fragment frame with a different toolUseId
+            starts a new call instead of appending to the previous one.
+        Goal: Ensure the same-id guard does not merge two distinct calls.
+        """
+        print("Setup: two calls, second arrives as name+input frames...")
+        for frag in ['{"', "command", '":', '"ls', '"}']:
+            aws_event_parser.feed(_aws_event_frame(
+                "toolUseEvent", {"input": frag, "name": "Bash", "toolUseId": "call_a"},
+            ))
+        aws_event_parser.feed(_aws_event_frame(
+            "toolUseEvent", {"name": "Bash", "stop": True, "toolUseId": "call_a"},
+        ))
+        aws_event_parser.feed(_aws_event_frame(
+            "toolUseEvent", {"input": '{"command":"pwd"}', "name": "Bash", "toolUseId": "call_b"},
+        ))
+        aws_event_parser.feed(_aws_event_frame(
+            "toolUseEvent", {"name": "Bash", "stop": True, "toolUseId": "call_b"},
+        ))
+
+        calls = aws_event_parser.get_tool_calls()
+        print(f"Result: {calls}")
+        assert len(calls) == 2
+        assert json.loads(calls[0]["function"]["arguments"]) == {"command": "ls"}
+        assert json.loads(calls[1]["function"]["arguments"]) == {"command": "pwd"}
 
     def test_parses_split_aws_frames_by_event_type(self, aws_event_parser):
         content = _aws_event_frame(
@@ -1296,12 +1359,13 @@ class TestTruncationRecoveryIntegration:
     Part of Truncation Recovery System (Issue #56).
     """
     
-    def test_tool_call_marked_with_truncation_flags(self, aws_event_parser):
+    def test_repairable_truncation_is_repaired_not_flagged(self, aws_event_parser):
         """
-        What it does: Verifies tool call is marked with _truncation_detected and _truncation_info.
-        Purpose: Ensure truncation detection marks tool calls for recovery system.
+        What it does: Verifies repairable truncated JSON is repaired in place.
+        Purpose: When only the trailing closers / a dangling string were lost,
+        the tool call must keep its recovered arguments instead of "{}".
         """
-        print("Setup: Creating tool call with truncated JSON arguments...")
+        print("Setup: Creating tool call with truncated (repairable) JSON arguments...")
         aws_event_parser.current_tool_call = {
             "id": "tooluse_truncated",
             "type": "function",
@@ -1310,25 +1374,63 @@ class TestTruncationRecoveryIntegration:
                 "arguments": '{"filePath": "/path/to/file.md", "content": "This is a very long content that was cut off'
             }
         }
-        
-        print("Action: Finalizing tool call (should detect truncation)...")
+
+        print("Action: Finalizing tool call (should repair truncation)...")
         aws_event_parser._finalize_tool_call()
-        
+
         print("Checking: Tool call was added to list...")
         assert len(aws_event_parser.tool_calls) == 1
-        
+
         tool_call = aws_event_parser.tool_calls[0]
         print(f"Tool call: {tool_call}")
-        
+
+        print("Checking: arguments were repaired to valid JSON...")
+        assert json.loads(tool_call["function"]["arguments"]) == {
+            "filePath": "/path/to/file.md",
+            "content": "This is a very long content that was cut off",
+        }
+
+        print("Checking: repaired call is NOT flagged for truncation recovery...")
+        assert tool_call.get("_truncation_detected") is not True
+        assert "_truncation_info" not in tool_call
+
+    def test_unrepairable_truncation_marked_with_truncation_flags(self, aws_event_parser):
+        """
+        What it does: Verifies unrecoverable JSON is still marked for recovery.
+        Purpose: Ensure truncation detection marks tool calls for the recovery
+        system when repair is impossible (mismatched closers).
+        """
+        print("Setup: Creating tool call with unrepairable JSON arguments...")
+        aws_event_parser.current_tool_call = {
+            "id": "tooluse_truncated",
+            "type": "function",
+            "function": {
+                "name": "write_to_file",
+                "arguments": '{"filePath": "/path/to/file.md", "content": 1]'
+            }
+        }
+
+        print("Action: Finalizing tool call (should detect truncation)...")
+        aws_event_parser._finalize_tool_call()
+
+        print("Checking: Tool call was added to list...")
+        assert len(aws_event_parser.tool_calls) == 1
+
+        tool_call = aws_event_parser.tool_calls[0]
+        print(f"Tool call: {tool_call}")
+
+        print("Checking: arguments fell back to {}...")
+        assert tool_call["function"]["arguments"] == "{}"
+
         print("Checking: _truncation_detected flag is set...")
         assert tool_call.get("_truncation_detected") is True
-        
+
         print("Checking: _truncation_info is present...")
         assert "_truncation_info" in tool_call
-        
+
         truncation_info = tool_call["_truncation_info"]
         print(f"Truncation info: {truncation_info}")
-        
+
         print("Checking: truncation_info has required fields...")
         assert truncation_info["is_truncated"] is True
         assert "size_bytes" in truncation_info
@@ -1410,9 +1512,88 @@ class TestTruncationRecoveryIntegration:
         print("Checking: First tool call NOT marked as truncated...")
         assert aws_event_parser.tool_calls[0].get("_truncation_detected") is not True
         
-        print("Checking: Second tool call IS marked as truncated...")
-        assert aws_event_parser.tool_calls[1].get("_truncation_detected") is True
-        assert "_truncation_info" in aws_event_parser.tool_calls[1]
+        print("Checking: Second tool call was repaired (recoverable truncation)...")
+        assert aws_event_parser.tool_calls[1]["function"]["arguments"] == '{"param": "incomplete"}'
+        assert aws_event_parser.tool_calls[1].get("_truncation_detected") is not True
         
         print("Checking: Third tool call NOT marked as truncated...")
         assert aws_event_parser.tool_calls[2].get("_truncation_detected") is not True
+
+class TestRepairTruncatedJson:
+    """Tests for repair_truncated_json helper."""
+
+    def test_missing_single_closing_brace(self):
+        assert repair_truncated_json('{"a": 1') == '{"a": 1}'
+
+    def test_missing_nested_closers(self):
+        assert repair_truncated_json('{"x": {"y": [1, 2') == '{"x": {"y": [1, 2]}}'
+
+    def test_unterminated_string_value(self):
+        assert repair_truncated_json('{"cmd": "echo hel') == '{"cmd": "echo hel"}'
+
+    def test_trailing_comma(self):
+        assert repair_truncated_json('{"a": "x",') == '{"a": "x"}'
+
+    def test_trailing_colon_dangling_key(self):
+        # "b" has no value: fall back to last complete member
+        assert repair_truncated_json('{"a": 1, "b":') == '{"a": 1}'
+
+    def test_dangling_partial_key(self):
+        assert repair_truncated_json('{"a": 1, "ke') == '{"a": 1}'
+
+    def test_escaped_quote_in_string(self):
+        assert repair_truncated_json('{"a": "say \\"hi') == '{"a": "say \\"hi"}'
+
+    def test_trailing_escape_backslash(self):
+        # trailing backslash would escape the closing quote - dropped
+        repaired = repair_truncated_json('{"a": "x\\')
+        assert repaired is not None
+        json.loads(repaired)
+
+    def test_braces_inside_strings_ignored(self):
+        assert repair_truncated_json('{"a": "{}{}{"') == '{"a": "{}{}{"}'
+
+    def test_mismatched_closer_not_repaired(self):
+        assert repair_truncated_json('{"a": 1]') is None
+
+    def test_garbage_not_repaired(self):
+        assert repair_truncated_json("not valid json {") is None
+
+    def test_empty_and_blank_not_repaired(self):
+        assert repair_truncated_json("") is None
+        assert repair_truncated_json("   ") is None
+
+    def test_valid_json_passthrough(self):
+        assert repair_truncated_json('{"a": 1}') == '{"a": 1}'
+
+    def test_large_repetitive_payload(self):
+        payload = '{"command": "echo ' + "The quick brown fox. " * 500
+        repaired = repair_truncated_json(payload)
+        assert repaired is not None
+        parsed = json.loads(repaired)
+        assert parsed["command"].startswith("echo The quick brown fox.")
+
+
+class TestFinalizeRepairedTruncation:
+    """Integration: fragmented stream cut short is repaired at finalize."""
+
+    def test_stream_fragments_cut_before_closer_are_repaired(self, aws_event_parser):
+        """
+        What it does: Feeds fragmented toolUseEvent frames whose concatenated
+        input is truncated before the closing brace, then finalizes.
+        Purpose: The client must receive the recovered arguments, not "{}".
+        """
+        tid = "call_repair_1"
+        frames = [_aws_event_frame("toolUseEvent", {"name": "Bash", "toolUseId": tid})]
+        for frag in ['{"comm', 'and":', '"echo hel']:
+            frames.append(_aws_event_frame(
+                "toolUseEvent", {"name": "Bash", "toolUseId": tid, "input": frag}))
+        frames.append(_aws_event_frame(
+            "toolUseEvent", {"name": "Bash", "toolUseId": tid, "stop": True}))
+        for frame in frames:
+            aws_event_parser.feed(frame)
+
+        calls = aws_event_parser.get_tool_calls()
+        assert len(calls) == 1
+        assert json.loads(calls[0]["function"]["arguments"]) == {"command": "echo hel"}
+        assert calls[0].get("_truncation_detected") is not True

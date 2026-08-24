@@ -41,6 +41,8 @@ from kiro.converters_core import (
     UnifiedTool,
     ThinkingConfig,
     build_kiro_payload,
+    build_tool_choice_directive,
+    coerce_tool_input_to_dict,
     extract_text_content,
     extract_images_from_content,
 )
@@ -112,6 +114,107 @@ def extract_system_prompt(system: Any) -> str:
         return "\n".join(text_parts)
 
     return str(system)
+
+
+EDIT_TOOL_MISMATCH = "String to replace not found in file"
+
+
+GPT_EDIT_RECOVERY_POLICY = (
+    "\n\n---\n"
+    "# Claude Code Edit Recovery\n\n"
+    "When using Claude Code's Edit tool, copy `old_string` exactly from the "
+    "latest contents returned by Read. Keep each replacement small and unique. "
+    "If an Edit tool result says `String to replace not found in file`, do not "
+    "repeat that Edit call or its arguments: first Read the same target file "
+    "again, then create a new Edit from the latest text.\n"
+)
+
+
+GPT_EDIT_RECOVERY_NOTICE = (
+    "\n\n[Edit Recovery Notice] The previous Edit failed because its old_string "
+    "did not match the current file. Do not repeat the same Edit parameters. "
+    "Read the target file now, then retry with a small, unique old_string "
+    "copied exactly from that latest Read result.\n"
+)
+
+
+def is_gpt_model(model: Any) -> bool:
+    """Return whether an Anthropic request targets a GPT model."""
+    if not isinstance(model, str):
+        return False
+    normalized = model.strip().lower()
+    return normalized.startswith(("gpt-", "gpt_"))
+
+
+def _block_value(block: Any, key: str, default: Any = None) -> Any:
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def has_unrecovered_edit_mismatch(messages: Any) -> bool:
+    """Detect a latest, unrecovered Claude Code Edit replacement failure.
+
+    The gateway cannot inspect the local workspace. It only uses the Anthropic
+    tool-use/tool-result history and deliberately treats the latest tool event
+    as authoritative: a later assistant tool call (for example Read) clears the
+    pending failure, so the recovery notice is emitted at most once per failure.
+    """
+    if not isinstance(messages, list):
+        return False
+
+    pending_edit_ids = set()
+    latest_tool_event_is_edit_mismatch = False
+
+    for message in messages:
+        role = _block_value(message, "role", "")
+        content = _block_value(message, "content", None)
+        blocks = content if isinstance(content, list) else []
+
+        if role == "assistant":
+            assistant_called_tool = False
+            for block in blocks:
+                if _block_value(block, "type") != "tool_use":
+                    continue
+                assistant_called_tool = True
+                latest_tool_event_is_edit_mismatch = False
+                tool_id = _block_value(block, "id")
+                tool_name = str(_block_value(block, "name", ""))
+                if tool_id and tool_name.lower() == "edit":
+                    pending_edit_ids.add(tool_id)
+
+            # Any assistant tool call means the model has started a new step;
+            # do not carry a prior failure past it.
+            if assistant_called_tool:
+                continue
+
+        if role != "user":
+            continue
+
+        for block in blocks:
+            if _block_value(block, "type") != "tool_result":
+                continue
+            latest_tool_event_is_edit_mismatch = False
+            tool_id = _block_value(block, "tool_use_id")
+            if tool_id not in pending_edit_ids:
+                continue
+            pending_edit_ids.discard(tool_id)
+            result_text = convert_anthropic_content_to_text(
+                _block_value(block, "content", "")
+            )
+            latest_tool_event_is_edit_mismatch = EDIT_TOOL_MISMATCH in result_text
+
+    return latest_tool_event_is_edit_mismatch
+
+
+def build_gpt_edit_recovery_directive(model: Any, messages: Any) -> str:
+    """Build the GPT-only Edit policy and one-shot recovery notice."""
+    if not is_gpt_model(model):
+        return ""
+    directive = GPT_EDIT_RECOVERY_POLICY
+    if has_unrecovered_edit_mismatch(messages):
+        directive += GPT_EDIT_RECOVERY_NOTICE
+    return directive
 
 
 def extract_tool_results_from_anthropic_content(content: Any) -> List[Dict[str, Any]]:
@@ -246,9 +349,9 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
                     "type": "function",
                     "function": {
                         "name": tool_name,
-                        "arguments": tool_input
-                        if isinstance(tool_input, str)
-                        else tool_input,
+                        # Raw-dict paths bypass Pydantic coercion, so normalize
+                        # string inputs here as well.
+                        "arguments": coerce_tool_input_to_dict(tool_input),
                     },
                 }
             )
@@ -489,6 +592,23 @@ def anthropic_to_kiro(
     # System prompt is already separate in Anthropic format!
     # It can be a string or list of content blocks (for prompt caching)
     system_prompt = extract_system_prompt(request.system)
+
+    # Enforce tool_choice via a system-prompt directive (Kiro has no toolChoice)
+    tool_choice_directive = build_tool_choice_directive(request.tool_choice)
+    if tool_choice_directive:
+        system_prompt = system_prompt + tool_choice_directive if system_prompt else tool_choice_directive.strip()
+
+    # GPT models need explicit recovery guidance for Claude Code's exact Edit
+    # semantics. This is Anthropic-only; OpenAI conversion is untouched.
+    edit_recovery_directive = build_gpt_edit_recovery_directive(
+        request.model, request.messages
+    )
+    if edit_recovery_directive:
+        system_prompt = (
+            system_prompt + edit_recovery_directive
+            if system_prompt
+            else edit_recovery_directive.strip()
+        )
 
     # Get model ID for Kiro API (normalizes + resolves hidden models)
     # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid
