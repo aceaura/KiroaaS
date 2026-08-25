@@ -95,10 +95,14 @@ def _upstream_response(status_code=200, payload=None, text=""):
     return response
 
 
-def _auth_manager(q_host="https://runtime.us-east-1.kiro.dev"):
+def _auth_manager(
+    q_host="https://runtime.us-east-1.kiro.dev",
+    profile_arn="arn:aws:codewhisperer:us-east-1:123456789012:profile/TEST",
+):
     """An auth manager whose q_host is un-redirected, as under main.py."""
     manager = Mock()
     manager.q_host = q_host
+    manager.profile_arn = profile_arn
     manager.fingerprint = "test-fingerprint"
     manager.get_access_token = AsyncMock(return_value="test-access-token")
     return manager
@@ -281,6 +285,18 @@ class TestHostResolution:
         headers = app.state.http_client.post.await_args.kwargs["headers"]
         assert headers["x-amz-target"].endswith("GetUsageLimits")
         assert headers["Content-Type"] == "application/x-amz-json-1.0"
+    @pytest.mark.parametrize("path", ["/usage", "/account"])
+    def test_current_get_usage_limits_body_is_sent(self, path, auth_header):
+        app = _build_app(auth_manager=_auth_manager())
+        TestClient(app).get(path, headers=auth_header)
+
+        body = app.state.http_client.post.await_args.kwargs["json"]
+        assert body == {
+            "profileArn": "arn:aws:codewhisperer:us-east-1:123456789012:profile/TEST",
+            "origin": "AI_EDITOR",
+            "resourceType": "AGENTIC_REQUEST",
+        }
+        assert "isEmailRequired" not in body
 
 
 # =============================================================================
@@ -373,6 +389,15 @@ class TestErrorPaths:
 
         assert response.status_code == 503
         assert "No initialized account" in response.json()["detail"]
+
+    @pytest.mark.parametrize("path", ["/usage", "/account"])
+    def test_missing_profile_arn_returns_503_without_upstream_call(self, path, auth_header):
+        app = _build_app(auth_manager=_auth_manager(profile_arn=None))
+        response = TestClient(app).get(path, headers=auth_header)
+
+        assert response.status_code == 503
+        assert "profileArn" in response.json()["detail"]
+        app.state.http_client.post.assert_not_awaited()
 
     @pytest.mark.parametrize("path", ["/usage", "/account"])
     def test_upstream_status_is_propagated(self, path, auth_header):

@@ -29,6 +29,34 @@ def _resolve_auth_manager(request: Request) -> KiroAuthManager:
     return account.auth_manager
 
 
+async def _get_usage_limits(request: Request, auth_manager: KiroAuthManager) -> dict:
+    profile_arn = auth_manager.profile_arn
+    if not profile_arn:
+        raise HTTPException(
+            status_code=503,
+            detail="Initialized account has no profileArn for usage queries",
+        )
+
+    token = await auth_manager.get_access_token()
+    headers = get_kiro_headers(auth_manager, token)
+    headers["x-amz-target"] = "com.amazon.aws.codewhisperer.runtime.AmazonCodeWhispererService.GetUsageLimits"
+    headers["Content-Type"] = "application/x-amz-json-1.0"
+
+    # GetUsageLimits lives on q.amazonaws.com; runtime.kiro.dev 400s with
+    # UnknownOperationException. Resolve the host here instead of relying on the
+    # control_plane_host redirect being installed.
+    url = to_q_amazonaws_host(auth_manager.q_host)
+    body = {
+        "profileArn": profile_arn,
+        "origin": "AI_EDITOR",
+        "resourceType": "AGENTIC_REQUEST",
+    }
+    response = await request.app.state.http_client.post(url, json=body, headers=headers)
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
+
+
 @router.get("/usage", dependencies=[Depends(verify_api_key)])
 async def get_usage(request: Request):
     """
@@ -40,26 +68,10 @@ async def get_usage(request: Request):
     logger.info("Request to /usage")
 
     auth_manager = _resolve_auth_manager(request)
-    shared_client = request.app.state.http_client
-
-    token = await auth_manager.get_access_token()
-    headers = get_kiro_headers(auth_manager, token)
-    headers["x-amz-target"] = "com.amazon.aws.codewhisperer.runtime.AmazonCodeWhispererService.GetUsageLimits"
-    headers["Content-Type"] = "application/x-amz-json-1.0"
-
-    # GetUsageLimits lives on q.amazonaws.com; runtime.kiro.dev 400s with
-    # UnknownOperationException. Resolve the host here instead of relying on the
-    # control_plane_host redirect being installed — it is not when the gateway
-    # runs via main.py, and installing it would also flip model fetching from
-    # the static FALLBACK_MODELS list to dynamic.
-    url = to_q_amazonaws_host(auth_manager.q_host)
-    body = {"origin": "AI_EDITOR", "isEmailRequired": True}
 
     try:
-        response = await shared_client.post(url, json=body, headers=headers)
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return JSONResponse(content=response.json())
+        usage_data = await _get_usage_limits(request, auth_manager)
+        return JSONResponse(content=usage_data)
     except HTTPException:
         raise
     except Exception as e:
@@ -78,30 +90,9 @@ async def get_account(request: Request):
     logger.info("Request to /account")
 
     auth_manager = _resolve_auth_manager(request)
-    shared_client = request.app.state.http_client
 
     try:
-        token = await auth_manager.get_access_token()
-        headers = get_kiro_headers(auth_manager, token)
-        headers["x-amz-target"] = "com.amazon.aws.codewhisperer.runtime.AmazonCodeWhispererService.GetUsageLimits"
-        headers["Content-Type"] = "application/x-amz-json-1.0"
-
-        # GetUsageLimits lives on q.amazonaws.com, not runtime.kiro.dev which
-        # only serves the chat operation. Same local host resolution as /usage.
-        url = to_q_amazonaws_host(auth_manager.q_host)
-        body = {"origin": "AI_EDITOR", "isEmailRequired": True}
-
-        logger.debug(f"Calling Kiro API with headers: {headers}")
-        response = await shared_client.post(url, json=body, headers=headers)
-
-        logger.debug(f"Kiro API response status: {response.status_code}")
-
-        if response.status_code != 200:
-            error_text = response.text
-            logger.error(f"Kiro API error: {response.status_code} - {error_text}")
-            raise HTTPException(status_code=response.status_code, detail=error_text)
-
-        usage_data = response.json()
+        usage_data = await _get_usage_limits(request, auth_manager)
 
         user_info = usage_data.get("userInfo", {})
         subscription_info = usage_data.get("subscriptionInfo", {})
