@@ -1313,6 +1313,83 @@ def normalize_message_roles(messages: List[UnifiedMessage]) -> List[UnifiedMessa
     return normalized
 
 
+def repair_unpaired_tool_uses(messages: List[UnifiedMessage]) -> List[UnifiedMessage]:
+    """
+    Synthesizes toolResults for toolUses that never received one.
+
+    Kiro rejects a request with 400 REQUEST_BODY_INVALID when an assistant
+    toolUse has no matching toolResult. Proxies in front of the gateway
+    (notably cc-switch translating Codex /responses items) can drop tool
+    messages whose output is pure media, leaving orphaned function calls in
+    the history. Once such items enter a session every later request fails
+    identically, so the gateway guarantees the pairing invariant itself.
+
+    Only missing results are synthesized; existing results (including
+    duplicates) are left untouched.
+
+    Args:
+        messages: Unified messages after role normalization/alternation
+
+    Returns:
+        The same list (mutated in place) with synthetic tool_results appended
+        to the user message that follows the owning assistant message
+    """
+    answered_ids = set()
+    for msg in messages:
+        if msg.role == "user" and msg.tool_results:
+            for tr in msg.tool_results:
+                tool_use_id = tr.get("tool_use_id")
+                if tool_use_id:
+                    answered_ids.add(tool_use_id)
+
+    repaired = 0
+    for idx, msg in enumerate(messages):
+        if msg.role != "assistant" or not msg.tool_calls:
+            continue
+        missing = [
+            tc.get("id")
+            for tc in msg.tool_calls
+            if tc.get("id") and tc.get("id") not in answered_ids
+        ]
+        if not missing:
+            continue
+
+        # Attach the synthetic results to the nearest following user message
+        # that already carries tool_results; otherwise the next user message;
+        # if the conversation has none, append one after the assistant turn.
+        target_idx = None
+        for follower_idx in range(idx + 1, len(messages)):
+            follower = messages[follower_idx]
+            if follower.role == "user":
+                target_idx = follower_idx
+                if follower.tool_results:
+                    break
+        if target_idx is None:
+            synthetic = UnifiedMessage(role="user", content="", tool_results=[])
+            messages.insert(idx + 1, synthetic)
+            target_idx = idx + 1
+
+        target = messages[target_idx]
+        if target.tool_results is None:
+            target.tool_results = []
+        for tool_use_id in missing:
+            target.tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": (
+                    "[gateway: tool result was not delivered by the client; "
+                    "the tool likely produced an image or other media that was "
+                    "moved into an adjacent user message.]"
+                ),
+            })
+            answered_ids.add(tool_use_id)
+            repaired += 1
+
+    if repaired:
+        logger.info(f"Repaired {repaired} unpaired tool_use(s) with synthetic results")
+    return messages
+
+
 def ensure_alternating_roles(messages: List[UnifiedMessage]) -> List[UnifiedMessage]:
     """
     Ensures alternating user/assistant roles by inserting synthetic assistant messages.
@@ -1641,7 +1718,12 @@ def build_kiro_payload(
     # Ensure alternating user/assistant roles (fixes issue #64)
     # Insert synthetic assistant messages between consecutive user messages
     merged_messages = ensure_alternating_roles(merged_messages)
-    
+
+    # Guarantee every assistant toolUse has a matching toolResult. Client-side
+    # proxies can drop pure-media tool messages (see repair_unpaired_tool_uses),
+    # and Kiro rejects the whole request otherwise.
+    merged_messages = repair_unpaired_tool_uses(merged_messages)
+
     if not merged_messages:
         raise ValueError("No messages to send")
     

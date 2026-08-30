@@ -25,6 +25,7 @@ from kiro.converters_core import (
     normalize_message_roles,
     ensure_alternating_roles,
     ensure_assistant_before_tool_results,
+    repair_unpaired_tool_uses,
     strip_all_tool_content,
     build_kiro_history,
     build_kiro_payload,
@@ -2013,6 +2014,147 @@ class TestNormalizeAndAlternatingIntegration:
         assert result[6].role == "user" and result[6].content == "Dev2"
         assert result[7].role == "assistant" and result[7].content == "继续执行"
         assert result[8].role == "user" and result[8].content == "User2"
+
+
+# ==================================================================================================
+# Tests for repair_unpaired_tool_uses
+# ==================================================================================================
+
+class TestRepairUnpairedToolUses:
+    """
+    Tests for repair_unpaired_tool_uses function.
+
+    Kiro rejects requests where an assistant toolUse has no matching
+    toolResult (400 REQUEST_BODY_INVALID). Proxies like cc-switch can drop
+    pure-media tool messages, leaving orphaned function calls.
+    """
+
+    @staticmethod
+    def _call(cid, name="view_image"):
+        return {"id": cid, "type": "function", "function": {"name": name, "arguments": "{}"}}
+
+    @staticmethod
+    def _result(cid):
+        return {"type": "tool_result", "tool_use_id": cid, "content": "ok"}
+
+    def test_fully_paired_conversation_is_unchanged(self):
+        """
+        What it does: Verifies a fully paired conversation passes through untouched.
+        Purpose: The repair must be a no-op for healthy clients.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1")]),
+            UnifiedMessage(role="user", content="", tool_results=[self._result("c1")]),
+        ]
+        original = [UnifiedMessage(role=m.role, content=m.content, tool_calls=m.tool_calls, tool_results=list(m.tool_results) if m.tool_results else None) for m in messages]
+
+        result = repair_unpaired_tool_uses(messages)
+
+        assert [m.role for m in result] == [m.role for m in original]
+        for got, want in zip(result, original):
+            assert got.tool_calls == want.tool_calls
+            assert got.tool_results == want.tool_results
+
+    def test_no_tool_messages_is_unchanged(self):
+        messages = [
+            UnifiedMessage(role="user", content="hi"),
+            UnifiedMessage(role="assistant", content="hello"),
+        ]
+        result = repair_unpaired_tool_uses(messages)
+        assert len(result) == 2
+        assert result[0].tool_results is None
+        assert result[1].tool_calls is None
+
+    def test_synthesizes_missing_result(self):
+        """
+        What it does: Synthesizes a toolResult for an orphaned toolUse.
+        Purpose: Missing results cause Kiro 400 REQUEST_BODY_INVALID.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1"), self._call("c2")]),
+            UnifiedMessage(role="user", content="", tool_results=[self._result("c2")]),
+        ]
+        result = repair_unpaired_tool_uses(messages)
+
+        user_with_results = result[2]
+        ids = [tr["tool_use_id"] for tr in user_with_results.tool_results]
+        assert "c1" in ids and "c2" in ids
+        synth = next(tr for tr in user_with_results.tool_results if tr["tool_use_id"] == "c1")
+        assert "gateway" in synth["content"]
+
+    def test_partial_missing_matches_codex_scenario(self):
+        """
+        What it does: Two of three calls missing results (the cc-switch/Codex
+        pure-media drop shape: assistant c1,c2,c3; user carries images; only
+        c3's tool message survived).
+        Purpose: Mirror the production incident exactly.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1"), self._call("c2"), self._call("c3")]),
+            UnifiedMessage(role="user", content="", tool_results=[self._result("c3")]),
+        ]
+        result = repair_unpaired_tool_uses(messages)
+
+        ids = [tr["tool_use_id"] for tr in result[2].tool_results]
+        assert sorted(ids) == ["c1", "c2", "c3"]
+
+    def test_appends_new_user_message_when_none_follows(self):
+        """
+        What it does: Assistant toolUse as the last message gets a synthetic
+        user message with the missing result.
+        Purpose: Cover the boundary where no following user message exists.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1")]),
+        ]
+        result = repair_unpaired_tool_uses(messages)
+
+        assert len(result) == 3
+        assert result[2].role == "user"
+        assert [tr["tool_use_id"] for tr in result[2].tool_results] == ["c1"]
+
+    def test_build_kiro_payload_includes_repair(self):
+        """
+        What it does: build_kiro_payload runs the repair; the synthetic result
+        reaches the Kiro history/current toolResults.
+        Purpose: Integration guarantee for both protocol paths.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1"), self._call("c2")]),
+            UnifiedMessage(role="user", content="", tool_results=[self._result("c2")]),
+        ]
+        result = build_kiro_payload(
+            messages=messages,
+            system_prompt="",
+            model_id="gpt-5.6-terra",
+            tools=[UnifiedTool(name="view_image", description="view", input_schema={"type": "object", "properties": {}})],
+            conversation_id="conv-repair",
+            profile_arn="arn:aws:test",
+            thinking_config=ThinkingConfig(enabled=False),
+        )
+
+        def _collect_ids(payload):
+            ids = []
+            entries = payload["conversationState"].get("history", [])
+            entries += [payload["conversationState"]["currentMessage"]]
+            for entry in entries:
+                user_msg = entry.get("userInputMessage", {})
+                for tr in (user_msg.get("userInputMessageContext", {}) or {}).get("toolResults", []):
+                    ids.append(tr["toolUseId"])
+                asst = entry.get("assistantResponseMessage", {})
+                for tu in asst.get("toolUses", []) or []:
+                    ids.append("call:" + tu["toolUseId"])
+            return ids
+
+        ids = _collect_ids(result.payload)
+        # Both toolUses must have results in the final payload (the merged
+        # user message with tool_results is the current message here).
+        assert "c1" in ids and "c2" in ids
 
 
 # ==================================================================================================
