@@ -52,7 +52,6 @@ from main import (
     DEFAULT_SERVER_PORT,
 )
 
-from extensions.routes_account import router as account_router
 from extensions.tool_name_alias import install_tool_name_aliasing
 from extensions.cloud_connector import install_cloud_connector
 from extensions.profile_arn_autofetch import install_profile_arn_autofetch
@@ -79,7 +78,10 @@ install_billing_header_strip()
 # it post-import still takes effect) rather than wrapping the already-registered
 # route handler.
 install_model_id_format(app)
-app.include_router(account_router)
+# /usage and /account are registered by main.py itself, so they exist on every
+# launch path (including `python main.py`, which the Docker image runs). Do not
+# re-add include_router(account_router) here — it would register both routes and
+# their OpenAPI entries twice.
 
 
 def _is_tauri_managed() -> bool:

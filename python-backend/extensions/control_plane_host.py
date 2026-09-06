@@ -38,6 +38,24 @@ _RUNTIME_HOST_RE = re.compile(r"^https://runtime\.(?P<region>[^/]+?)\.kiro\.dev/
 _Q_HOST_TEMPLATE = "https://q.{region}.amazonaws.com"
 
 
+def to_q_amazonaws_host(host: str) -> str:
+    """Rewrite a runtime.kiro.dev host to its q.amazonaws control-plane equivalent.
+
+    A pure function, usable without installing the redirect below. Callers that
+    issue control-plane operations need it either way: those operations 400/404
+    on runtime.kiro.dev (see the module docstring), and the q_host property is
+    only rewritten when install_control_plane_host_redirect() has run — which is
+    not the case when the gateway is started via main.py.
+
+    Non-runtime hosts (an already-redirected q.amazonaws host, or any custom
+    endpoint) pass through unchanged, so applying this twice is a no-op.
+    """
+    match = _RUNTIME_HOST_RE.match(host or "")
+    if match:
+        return _Q_HOST_TEMPLATE.format(region=match.group("region"))
+    return host
+
+
 def _redirected_q_host(self):
     """Property getter: rewrite a runtime q_host to its q.amazonaws equivalent.
 
@@ -45,11 +63,7 @@ def _redirected_q_host(self):
     resolution still applies; only the host shape is swapped. Non-runtime
     hosts (old q.amazonaws endpoint) pass through unchanged.
     """
-    host = self._q_host
-    match = _RUNTIME_HOST_RE.match(host or "")
-    if match:
-        return _Q_HOST_TEMPLATE.format(region=match.group("region"))
-    return host
+    return to_q_amazonaws_host(self._q_host)
 
 
 def install_control_plane_host_redirect() -> None:

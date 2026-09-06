@@ -89,6 +89,11 @@ from kiro.routes_anthropic import router as anthropic_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
 
+# Local extension routes. Registered here rather than in app_entry.py so they
+# exist for every launch path — the Docker image runs `python main.py`, which
+# never executed app_entry.py's include_router and therefore served 404.
+from extensions.routes_account import router as account_router
+
 
 # --- Loguru Configuration ---
 logger.remove()
@@ -570,6 +575,9 @@ app.include_router(openai_router)
 
 # Anthropic-compatible API: /v1/messages
 app.include_router(anthropic_router)
+
+# Local extensions: /usage, /account
+app.include_router(account_router)
 
 
 # --- Uvicorn log config ---

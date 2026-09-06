@@ -2,7 +2,8 @@
 Extension routes: /usage and /account.
 
 Lives outside the upstream kiro/ tree so upstream can be sync'd without conflicts.
-Mounted by app_entry.py.
+Mounted by main.py, so the routes exist for every launch path (the Docker image
+runs `python main.py`; app_entry.py imports that same app object).
 """
 
 import json
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from extensions.control_plane_host import to_q_amazonaws_host
 from kiro.auth import KiroAuthManager
 from kiro.routes_openai import verify_api_key
 from kiro.utils import get_kiro_headers
@@ -27,6 +29,34 @@ def _resolve_auth_manager(request: Request) -> KiroAuthManager:
     return account.auth_manager
 
 
+async def _get_usage_limits(request: Request, auth_manager: KiroAuthManager) -> dict:
+    profile_arn = auth_manager.profile_arn
+    if not profile_arn:
+        raise HTTPException(
+            status_code=503,
+            detail="Initialized account has no profileArn for usage queries",
+        )
+
+    token = await auth_manager.get_access_token()
+    headers = get_kiro_headers(auth_manager, token)
+    headers["x-amz-target"] = "com.amazon.aws.codewhisperer.runtime.AmazonCodeWhispererService.GetUsageLimits"
+    headers["Content-Type"] = "application/x-amz-json-1.0"
+
+    # GetUsageLimits lives on q.amazonaws.com; runtime.kiro.dev 400s with
+    # UnknownOperationException. Resolve the host here instead of relying on the
+    # control_plane_host redirect being installed.
+    url = to_q_amazonaws_host(auth_manager.q_host)
+    body = {
+        "profileArn": profile_arn,
+        "origin": "AI_EDITOR",
+        "resourceType": "AGENTIC_REQUEST",
+    }
+    response = await request.app.state.http_client.post(url, json=body, headers=headers)
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    return response.json()
+
+
 @router.get("/usage", dependencies=[Depends(verify_api_key)])
 async def get_usage(request: Request):
     """
@@ -38,24 +68,10 @@ async def get_usage(request: Request):
     logger.info("Request to /usage")
 
     auth_manager = _resolve_auth_manager(request)
-    shared_client = request.app.state.http_client
-
-    token = await auth_manager.get_access_token()
-    headers = get_kiro_headers(auth_manager, token)
-    headers["x-amz-target"] = "com.amazon.aws.codewhisperer.runtime.AmazonCodeWhispererService.GetUsageLimits"
-    headers["Content-Type"] = "application/x-amz-json-1.0"
-
-    # GetUsageLimits lives on q.amazonaws.com; runtime.kiro.dev 400s with
-    # UnknownOperationException. q_host is redirected there by the
-    # control_plane_host extension.
-    url = auth_manager.q_host
-    body = {"origin": "AI_EDITOR", "isEmailRequired": True}
 
     try:
-        response = await shared_client.post(url, json=body, headers=headers)
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        return JSONResponse(content=response.json())
+        usage_data = await _get_usage_limits(request, auth_manager)
+        return JSONResponse(content=usage_data)
     except HTTPException:
         raise
     except Exception as e:
@@ -74,30 +90,9 @@ async def get_account(request: Request):
     logger.info("Request to /account")
 
     auth_manager = _resolve_auth_manager(request)
-    shared_client = request.app.state.http_client
 
     try:
-        token = await auth_manager.get_access_token()
-        headers = get_kiro_headers(auth_manager, token)
-        headers["x-amz-target"] = "com.amazon.aws.codewhisperer.runtime.AmazonCodeWhispererService.GetUsageLimits"
-        headers["Content-Type"] = "application/x-amz-json-1.0"
-
-        # GetUsageLimits lives on q.amazonaws.com (redirected q_host), not
-        # runtime.kiro.dev which only serves the chat operation.
-        url = auth_manager.q_host
-        body = {"origin": "AI_EDITOR", "isEmailRequired": True}
-
-        logger.debug(f"Calling Kiro API with headers: {headers}")
-        response = await shared_client.post(url, json=body, headers=headers)
-
-        logger.debug(f"Kiro API response status: {response.status_code}")
-
-        if response.status_code != 200:
-            error_text = response.text
-            logger.error(f"Kiro API error: {response.status_code} - {error_text}")
-            raise HTTPException(status_code=response.status_code, detail=error_text)
-
-        usage_data = response.json()
+        usage_data = await _get_usage_limits(request, auth_manager)
 
         user_info = usage_data.get("userInfo", {})
         subscription_info = usage_data.get("subscriptionInfo", {})
