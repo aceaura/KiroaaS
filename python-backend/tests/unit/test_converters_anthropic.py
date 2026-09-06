@@ -25,6 +25,7 @@ from kiro.converters_anthropic import (
     convert_anthropic_tools,
     anthropic_to_kiro,
     extract_thinking_config_from_anthropic,
+    resolve_anthropic_first_token_timeout,
     resolve_anthropic_tool_choice,
 )
 from kiro.converters_core import UnifiedMessage, UnifiedTool
@@ -1754,7 +1755,7 @@ class TestAnthropicToKiro:
 
 class TestExtractThinkingConfigFromAnthropic:
     """Tests for extract_thinking_config_from_anthropic function."""
-    
+
     def test_no_thinking(self):
         """
         What it does: Verifies ThinkingConfig(enabled=True, budget_tokens=None) when thinking=None
@@ -1766,14 +1767,14 @@ class TestExtractThinkingConfigFromAnthropic:
             messages=[AnthropicMessage(role="user", content="test")],
             max_tokens=1024
         )
-        
+
         print("Extracting thinking config...")
         config = extract_thinking_config_from_anthropic(request)
-        
+
         print(f"Comparing: enabled={config.enabled}, budget_tokens={config.budget_tokens}")
         assert config.enabled is True
         assert config.budget_tokens is None
-    
+
     def test_thinking_enabled_with_budget(self):
         """
         What it does: Verifies correct extraction of thinking.budget_tokens
@@ -1786,14 +1787,14 @@ class TestExtractThinkingConfigFromAnthropic:
             max_tokens=1024,
             thinking={"type": "enabled", "budget_tokens": 8000}
         )
-        
+
         print("Extracting thinking config...")
         config = extract_thinking_config_from_anthropic(request)
-        
+
         print(f"Comparing: enabled={config.enabled}, budget_tokens={config.budget_tokens}")
         assert config.enabled is True
         assert config.budget_tokens == 8000
-    
+
     def test_thinking_enabled_without_budget(self):
         """
         What it does: Verifies ThinkingConfig when thinking.type="enabled" but no budget_tokens
@@ -1806,14 +1807,14 @@ class TestExtractThinkingConfigFromAnthropic:
             max_tokens=1024,
             thinking={"type": "enabled"}
         )
-        
+
         print("Extracting thinking config...")
         config = extract_thinking_config_from_anthropic(request)
-        
+
         print(f"Comparing: enabled={config.enabled}, budget_tokens={config.budget_tokens}")
         assert config.enabled is True
         assert config.budget_tokens is None
-    
+
     def test_thinking_disabled(self):
         """
         What it does: Verifies ThinkingConfig(enabled=False) when thinking.type="disabled"
@@ -1826,14 +1827,14 @@ class TestExtractThinkingConfigFromAnthropic:
             max_tokens=1024,
             thinking={"type": "disabled"}
         )
-        
+
         print("Extracting thinking config...")
         config = extract_thinking_config_from_anthropic(request)
-        
+
         print(f"Comparing: enabled={config.enabled}, budget_tokens={config.budget_tokens}")
         assert config.enabled is False
         assert config.budget_tokens is None
-    
+
     def test_thinking_invalid_type(self):
         """
         What it does: Verifies default config when thinking.type is unknown
@@ -1846,19 +1847,143 @@ class TestExtractThinkingConfigFromAnthropic:
             max_tokens=1024,
             thinking={"type": "unknown"}
         )
-        
+
         print("Extracting thinking config...")
         config = extract_thinking_config_from_anthropic(request)
-        
+
         print(f"Comparing: enabled={config.enabled}, budget_tokens={config.budget_tokens}")
         assert config.enabled is True
         assert config.budget_tokens is None
-    
+
+    def test_thinking_adaptive_with_output_config_effort(self):
+        """
+        What it does: Verifies adaptive thinking reads effort from output_config
+        Purpose: Ensure modern Claude adaptive thinking needs no budget_tokens
+        """
+        print("Creating request with adaptive thinking and output_config.effort='high'...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "high"}
+        )
+
+        print("Extracting thinking config...")
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: enabled={config.enabled}, effort={config.effort}, budget={config.budget_tokens}")
+        assert config.enabled is True
+        assert config.effort == "high"
+        assert config.budget_tokens is None
+
+    def test_adaptive_high_effort_extends_first_token_timeout(self):
+        """
+        What it does: Verifies adaptive high effort uses a 60s first-byte wait
+        Purpose: Prevent modern Claude reasoning requests from premature retries
+        """
+        print("Creating adaptive thinking request for claude-opus-5...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "high"}
+        )
+
+        print("Resolving first-token timeout...")
+        timeout = resolve_anthropic_first_token_timeout(request)
+
+        print(f"Comparing: expected=60.0, got={timeout}")
+        assert timeout == 60.0
+
+    def test_thinking_adaptive_with_reasoning_effort(self):
+        """
+        What it does: Verifies adaptive thinking falls back to reasoning_effort
+        Purpose: Ensure clients using the flat reasoning_effort field are honored
+        """
+        print("Creating request with adaptive thinking and reasoning_effort='low'...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "adaptive"},
+            reasoning_effort="low"
+        )
+
+        print("Extracting thinking config...")
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: enabled={config.enabled}, effort={config.effort}")
+        assert config.enabled is True
+        assert config.effort == "low"
+
+    def test_thinking_adaptive_without_effort(self):
+        """
+        What it does: Verifies adaptive thinking without any effort uses defaults
+        Purpose: Adaptive requests must not fabricate a numeric budget
+        """
+        print("Creating request with adaptive thinking and no effort...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "adaptive"}
+        )
+
+        print("Extracting thinking config...")
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: enabled={config.enabled}, effort={config.effort}, budget={config.budget_tokens}")
+        assert config.enabled is True
+        assert config.effort is None
+        assert config.budget_tokens is None
+
+    def test_output_config_effort_none_disables_thinking(self):
+        """
+        What it does: Verifies output_config.effort='none' is an explicit disable
+        Purpose: Ensure 'none' is not silently replaced with a fallback tier
+        """
+        print("Creating request with adaptive thinking and output_config.effort='none'...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "none"}
+        )
+
+        print("Extracting thinking config...")
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: enabled={config.enabled}, effort={config.effort}")
+        assert config.enabled is False
+
+    def test_output_config_effort_without_thinking(self):
+        """
+        What it does: Verifies output_config.effort works without a thinking block
+        Purpose: Ensure effort-only requests take the qualitative path
+        """
+        print("Creating request with only output_config.effort='medium'...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            output_config={"effort": "medium"}
+        )
+
+        print("Extracting thinking config...")
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: enabled={config.enabled}, effort={config.effort}")
+        assert config.enabled is True
+        assert config.effort == "medium"
+
 
 
 class TestAnthropicToKiroIntegration:
     """Integration tests for anthropic_to_kiro with thinking config."""
-    
+
     def test_extracts_and_passes_thinking_config(self):
         """
         What it does: Verifies anthropic_to_kiro extracts thinking_config and passes to core
@@ -1871,20 +1996,108 @@ class TestAnthropicToKiroIntegration:
             max_tokens=1024,
             thinking={"type": "enabled", "budget_tokens": 6000}
         )
-        
+
         print("Calling anthropic_to_kiro...")
         with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-sonnet-4.5"):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
                 with patch("kiro.converters_core.FAKE_REASONING_BUDGET_CAP", 10000):
                     payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
-        
+
         print("Extracting userInputMessage content...")
         user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
         content = user_input["content"]
-        
+
         print(f"Checking for <max_thinking_length>6000</max_thinking_length>...")
         assert "<max_thinking_length>6000</max_thinking_length>" in content
         assert "<thinking_mode>enabled</thinking_mode>" in content
+
+    def test_adaptive_thinking_forwards_native_fields(self):
+        """
+        What it does: Verifies adaptive thinking on a supported model produces native fields
+        Purpose: Adaptive thinking is forwarded verbatim, never converted to a budget
+        """
+        print("Creating adaptive thinking request for claude-opus-5...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "high"}
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+
+        print("Checking native fields...")
+        assert payload["additionalModelRequestFields"] == {
+            "output_config": {"effort": "high"},
+            "thinking": {"type": "adaptive"},
+        }
+
+        print("Checking fake thinking tags were suppressed...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>" not in content
+        assert "<max_thinking_length>" not in content
+        assert "<thinking_effort>" not in content
+
+    def test_adaptive_thinking_unsupported_model_omits_fields(self):
+        """
+        What it does: Verifies adaptive thinking on an unsupported model sends nothing
+        Purpose: Never fabricate a numeric budget for models without a native channel
+        """
+        print("Creating adaptive thinking request for claude-sonnet-4.5...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "high"}
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-sonnet-4.5"):
+            with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+                payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+
+        print("Checking no native fields were fabricated...")
+        assert "additionalModelRequestFields" not in payload
+
+        print("Checking fake tags were suppressed (no fabricated budget either)...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>" not in content
+        assert "<max_thinking_length>" not in content
+
+    def test_native_effort_coexists_with_tool_choice_directive(self):
+        """
+        What it does: Verifies a named tool_choice directive and native effort both apply
+        Purpose: Ensure the directive system prompt and native fields do not conflict
+        """
+        print("Creating adaptive request with a named tool_choice...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "medium"},
+            tools=[AnthropicTool(
+                name="get_weather",
+                description="Get weather",
+                input_schema={"type": "object", "properties": {}}
+            )],
+            tool_choice={"type": "tool", "name": "get_weather"}
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+
+        print("Checking native effort fragment...")
+        assert payload["additionalModelRequestFields"]["output_config"] == {"effort": "medium"}
+
+        print("Checking tool_choice directive survived in the payload...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "get_weather" in content
 
 
 class TestStrictAnthropicToolChoiceIntegration:

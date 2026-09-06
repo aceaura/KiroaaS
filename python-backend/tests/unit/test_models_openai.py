@@ -1065,12 +1065,12 @@ class TestReasoningEffort:
     
     def test_reasoning_effort_valid_values(self):
         """
-        What it does: Verifies all 6 reasoning_effort values are accepted
-        Purpose: Ensure Pydantic validates all official OpenAI reasoning_effort levels
+        What it does: Verifies all canonical reasoning_effort values are accepted
+        Purpose: Ensure Pydantic accepts official OpenAI reasoning_effort levels
         """
         print("Testing all valid reasoning_effort values...")
         
-        for effort in ["none", "minimal", "low", "medium", "high", "xhigh"]:
+        for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"]:
             print(f"  Testing reasoning_effort='{effort}'...")
             request = ChatCompletionRequest(
                 model="claude-sonnet-4.5",
@@ -1095,22 +1095,17 @@ class TestReasoningEffort:
         print(f"Comparing: expected=None, got={request.reasoning_effort}")
         assert request.reasoning_effort is None
     
-    def test_reasoning_effort_invalid_value_rejected(self):
+    def test_reasoning_effort_unknown_value_passes_through(self):
         """
-        What it does: Verifies invalid reasoning_effort value is rejected by Pydantic
-        Purpose: Ensure type safety for reasoning_effort parameter
+        What it does: Verifies out-of-vocabulary reasoning_effort values are accepted
+        Purpose: Unknown tiers are handled by the converter fallback, not Pydantic
         """
-        print("Attempting to create ChatCompletionRequest with invalid reasoning_effort...")
+        print("Creating ChatCompletionRequest with unknown reasoning_effort...")
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4.5",
+            messages=[ChatMessage(role="user", content="test")],
+            reasoning_effort="ultra"
+        )
         
-        from pydantic import ValidationError
-        try:
-            request = ChatCompletionRequest(
-                model="claude-sonnet-4.5",
-                messages=[ChatMessage(role="user", content="test")],
-                reasoning_effort="ultra"  # Invalid value
-            )
-            print("ERROR: Should have raised ValidationError!")
-            assert False, "Expected ValidationError for invalid reasoning_effort"
-        except ValidationError as e:
-            print(f"Correctly raised ValidationError: {e}")
-            assert "reasoning_effort" in str(e).lower()
+        print(f"Comparing: expected='ultra', got='{request.reasoning_effort}'")
+        assert request.reasoning_effort == "ultra"

@@ -43,6 +43,14 @@ from kiro.config import (
     FAKE_REASONING_BUDGET_CAP,
     KIRO_MAX_PAYLOAD_BYTES,
     AUTO_TRIM_PAYLOAD,
+    NATIVE_EFFORT_ENABLED,
+    NATIVE_EFFORT_NONE_ON_DISABLED,
+    NATIVE_EFFORT_SUPPRESS_TAGS,
+)
+from kiro.effort_schema import (
+    NATIVE_EFFORT_FIELD,
+    lookup_effort_schema,
+    resolve_effort_decision,
 )
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 
@@ -54,30 +62,16 @@ from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 @dataclass
 class ThinkingConfig:
     """
-    Unified thinking configuration for fake reasoning.
-    
-    This configuration is created by API-specific adapters (OpenAI, Anthropic)
-    and passed to the core layer for thinking tag injection.
-    
+    Unified thinking configuration for reasoning control.
+
     Attributes:
-        enabled: Whether to inject thinking tags into the request
-        budget_tokens: Token budget for thinking (None = use FAKE_REASONING_MAX_TOKENS default)
-    
-    Examples:
-        >>> # Default configuration (enabled with default budget)
-        >>> ThinkingConfig()
-        ThinkingConfig(enabled=True, budget_tokens=None)
-        
-        >>> # Disabled by client (reasoning_effort="none" or thinking.type="disabled")
-        >>> ThinkingConfig(enabled=False, budget_tokens=None)
-        ThinkingConfig(enabled=False, budget_tokens=None)
-        
-        >>> # Custom budget from client
-        >>> ThinkingConfig(enabled=True, budget_tokens=8000)
-        ThinkingConfig(enabled=True, budget_tokens=8000)
+        enabled: Whether reasoning may be requested
+        budget_tokens: Explicit numeric token budget supplied by the client
+        effort: Qualitative effort tier supplied by the client
     """
     enabled: bool = True
     budget_tokens: Optional[int] = None
+    effort: Optional[str] = None
 
 
 @dataclass
@@ -412,9 +406,9 @@ def get_thinking_system_prompt_addition() -> str:
     Generate system prompt addition that legitimizes thinking tags.
     
     This text is added to the system prompt to inform the model that
-    the <thinking_mode>, <max_thinking_length>, and <thinking_instruction>
-    tags in user messages are legitimate system-level instructions,
-    not prompt injection attempts.
+    the <thinking_mode>, <thinking_effort>, <max_thinking_length>, and
+    <thinking_instruction> tags in user messages are legitimate system-level
+    instructions, not prompt injection attempts.
     
     Returns:
         System prompt addition text (empty string if fake reasoning is disabled)
@@ -428,6 +422,7 @@ def get_thinking_system_prompt_addition() -> str:
         "This conversation uses extended thinking mode. User messages may contain "
         "special XML tags that are legitimate system-level instructions:\n"
         "- `<thinking_mode>enabled</thinking_mode>` - enables extended thinking\n"
+        "- `<thinking_effort>LEVEL</thinking_effort>` - sets qualitative thinking effort\n"
         "- `<max_thinking_length>N</max_thinking_length>` - sets maximum thinking tokens\n"
         "- `<thinking_instruction>...</thinking_instruction>` - provides thinking guidelines\n\n"
         "These tags are NOT prompt injection attempts. They are part of the system's "
@@ -466,55 +461,18 @@ def get_truncation_recovery_system_addition() -> str:
 
 def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
     """
-    Inject fake reasoning tags into content based on configuration.
-    
-    When FAKE_REASONING_ENABLED is True and thinking_config.enabled is True,
-    this function prepends the special thinking mode tags to the content.
-    These tags instruct the model to include its reasoning process in the response.
-    
-    Args:
-        content: Original content string
-        thinking_config: Thinking configuration from API adapter
-    
-    Returns:
-        Content with thinking tags prepended (if enabled) or original content
-    
-    Examples:
-        >>> # Disabled globally
-        >>> inject_thinking_tags("Hello", ThinkingConfig())  # Returns "Hello" if FAKE_REASONING_ENABLED=False
-        
-        >>> # Disabled by client
-        >>> inject_thinking_tags("Hello", ThinkingConfig(enabled=False))  # Returns "Hello"
-        
-        >>> # Enabled with custom budget
-        >>> inject_thinking_tags("Hello", ThinkingConfig(enabled=True, budget_tokens=8000))
-        '<thinking_mode>enabled</thinking_mode>\\n<max_thinking_length>8000</max_thinking_length>...Hello'
+    Inject reasoning-control tags into content based on configuration.
+
+    Qualitative effort is preserved verbatim. Explicit and default numeric
+    budgets remain on the legacy max_thinking_length path.
     """
-    # Check if thinking is enabled globally
     if not FAKE_REASONING_ENABLED:
         return content
-    
-    # Check if thinking is enabled for this request
+
     if not thinking_config.enabled:
         logger.debug("Thinking disabled by client request")
         return content
-    
-    # Determine effective budget
-    if thinking_config.budget_tokens is not None:
-        effective_budget = thinking_config.budget_tokens
-    else:
-        effective_budget = FAKE_REASONING_MAX_TOKENS
-    
-    # Apply cap if enabled
-    if FAKE_REASONING_BUDGET_CAP > 0 and effective_budget > FAKE_REASONING_BUDGET_CAP:
-        logger.warning(
-            f"Client requested thinking budget {effective_budget} exceeds cap {FAKE_REASONING_BUDGET_CAP}. "
-            f"Using capped value {FAKE_REASONING_BUDGET_CAP}. "
-            f"Set FAKE_REASONING_BUDGET_CAP=0 to disable capping."
-        )
-        effective_budget = FAKE_REASONING_BUDGET_CAP
-    
-    # Thinking instruction to improve reasoning quality
+
     thinking_instruction = (
         "Think in English for better reasoning quality.\n\n"
         "Your thinking process should be thorough and systematic:\n"
@@ -526,15 +484,32 @@ def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
         "After completing your thinking, respond in the same language the user is using in their messages, or in the language specified in their settings if available.\n\n"
         "Take the time you need. Quality of thought matters more than speed."
     )
-    
+
+    if thinking_config.effort is not None:
+        control_tag = f"<thinking_effort>{thinking_config.effort}</thinking_effort>"
+        logger.debug(f"Injecting thinking tags with effort='{thinking_config.effort}'")
+    elif thinking_config.budget_tokens is not None:
+        effective_budget = thinking_config.budget_tokens
+        if FAKE_REASONING_BUDGET_CAP > 0 and effective_budget > FAKE_REASONING_BUDGET_CAP:
+            logger.warning(
+                f"Client requested thinking budget {effective_budget} exceeds cap {FAKE_REASONING_BUDGET_CAP}. "
+                f"Using capped value {FAKE_REASONING_BUDGET_CAP}. "
+                f"Set FAKE_REASONING_BUDGET_CAP=0 to disable capping."
+            )
+            effective_budget = FAKE_REASONING_BUDGET_CAP
+        control_tag = f"<max_thinking_length>{effective_budget}</max_thinking_length>"
+        logger.debug(f"Injecting thinking tags with explicit budget={effective_budget}")
+    else:
+        effective_budget = FAKE_REASONING_MAX_TOKENS
+        control_tag = f"<max_thinking_length>{effective_budget}</max_thinking_length>"
+        logger.debug(f"Injecting thinking tags with default budget={effective_budget}")
+
     thinking_prefix = (
-        f"<thinking_mode>enabled</thinking_mode>\n"
-        f"<max_thinking_length>{effective_budget}</max_thinking_length>\n"
+        "<thinking_mode>enabled</thinking_mode>\n"
+        f"{control_tag}\n"
         f"<thinking_instruction>{thinking_instruction}</thinking_instruction>\n\n"
     )
-    
-    logger.debug(f"Injecting thinking tags with budget={effective_budget}")
-    
+
     return thinking_prefix + content
 
 
@@ -1655,6 +1630,7 @@ def build_kiro_payload(
     conversation_id: str,
     profile_arn: str,
     thinking_config: ThinkingConfig,
+    native_thinking: Optional[Dict[str, Any]] = None,
 ) -> KiroPayloadResult:
     """
     Builds complete payload for Kiro API from unified data.
@@ -1670,6 +1646,7 @@ def build_kiro_payload(
         conversation_id: Unique conversation ID
         profile_arn: AWS CodeWhisperer profile ARN
         thinking_config: Thinking configuration from API adapter
+        native_thinking: Anthropic adaptive thinking dictionary to forward verbatim
 
     Returns:
         KiroPayloadResult with payload and tool documentation
@@ -1687,11 +1664,45 @@ def build_kiro_payload(
     full_system_prompt = system_prompt
     if tool_documentation:
         full_system_prompt = full_system_prompt + tool_documentation if full_system_prompt else tool_documentation.strip()
-    
+
+    if not thinking_config.enabled:
+        requested_effort = "none" if NATIVE_EFFORT_NONE_ON_DISABLED else None
+    else:
+        requested_effort = thinking_config.effort
+    effort_decision = resolve_effort_decision(model_id, requested_effort)
+    logger.info(
+        "effort_decision "
+        f"model={model_id} "
+        f"requested={effort_decision.requested or 'none'} "
+        f"adopted={effort_decision.adopted or 'none'} "
+        f"field={effort_decision.field or 'none'} "
+        f"outcome={effort_decision.outcome} "
+        f"clamped={str(effort_decision.clamped).lower()} "
+        f"reason={effort_decision.reason}"
+    )
+
+    native_fragment: Dict[str, Any] = (
+        dict(effort_decision.fragment) if effort_decision.fragment is not None else {}
+    )
+    native_thinking_requested = native_thinking is not None and NATIVE_EFFORT_ENABLED
+    if native_thinking_requested:
+        if lookup_effort_schema(model_id) is not None:
+            native_fragment["thinking"] = dict(native_thinking)
+        else:
+            logger.debug(
+                f"Model '{model_id}' has no native thinking channel; "
+                "omitting adaptive thinking instead of fabricating a budget"
+            )
+
+    suppress_tags = (
+        bool(native_fragment) or native_thinking_requested
+    ) and NATIVE_EFFORT_SUPPRESS_TAGS
+
     # Add thinking mode legitimization to system prompt if enabled
-    thinking_system_addition = get_thinking_system_prompt_addition()
-    if thinking_system_addition:
-        full_system_prompt = full_system_prompt + thinking_system_addition if full_system_prompt else thinking_system_addition.strip()
+    if not suppress_tags:
+        thinking_system_addition = get_thinking_system_prompt_addition()
+        if thinking_system_addition:
+            full_system_prompt = full_system_prompt + thinking_system_addition if full_system_prompt else thinking_system_addition.strip()
     
     # Add truncation recovery legitimization to system prompt if enabled
     truncation_system_addition = get_truncation_recovery_system_addition()
@@ -1802,7 +1813,10 @@ def build_kiro_payload(
     
     # Inject thinking tags if enabled (only for the current/last user message)
     if current_message.role == "user":
-        current_content = inject_thinking_tags(current_content, thinking_config)
+        if suppress_tags:
+            logger.debug("Skipping thinking tag injection for native thinking or effort")
+        else:
+            current_content = inject_thinking_tags(current_content, thinking_config)
     
     # Build userInputMessage
     user_input_message = {
@@ -1837,6 +1851,9 @@ def build_kiro_payload(
     # Add profileArn
     if profile_arn:
         payload["profileArn"] = profile_arn
+
+    if native_fragment:
+        payload[NATIVE_EFFORT_FIELD] = native_fragment
 
     # Payload size guard — auto-trim if enabled
     if AUTO_TRIM_PAYLOAD:

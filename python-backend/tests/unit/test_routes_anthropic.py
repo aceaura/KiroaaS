@@ -56,6 +56,8 @@ class TestStrictStreamingBuffering:
         request_data = AnthropicMessagesRequest.model_validate({
             "model": "claude-sonnet-4-5",
             "max_tokens": 1024,
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
             "messages": [{"role": "user", "content": "Use the tool"}],
             "stream": True,
             "tools": [{
@@ -69,15 +71,17 @@ class TestStrictStreamingBuffering:
         http_client.request_with_retry = AsyncMock(return_value=upstream_response)
         http_client.close = AsyncMock()
 
+        collect_mock = AsyncMock(side_effect=ToolChoiceViolation("required tool call missing"))
         with patch("kiro.routes_anthropic.KiroHttpClient", return_value=http_client), \
              patch(
                  "kiro.routes_anthropic.collect_with_tool_choice_retry",
-                 AsyncMock(side_effect=ToolChoiceViolation("required tool call missing")),
+                 collect_mock,
              ), \
              patch("kiro.routes_anthropic.stream_anthropic_result") as stream_encoder:
             response = await messages(request, request_data)
 
         assert response.status_code == 502
+        assert collect_mock.await_args.kwargs["first_token_timeout"] == 60.0
         assert json.loads(response.body)["error"]["type"] == "tool_choice_not_satisfied"
         stream_encoder.assert_not_called()
 

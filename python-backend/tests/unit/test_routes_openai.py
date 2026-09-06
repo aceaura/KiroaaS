@@ -60,6 +60,7 @@ class TestStrictStreamingBuffering:
         request_data = ChatCompletionRequest.model_validate({
             "model": "claude-sonnet-4-5",
             "messages": [{"role": "user", "content": "Use the tool"}],
+            "reasoning_effort": "high",
             "stream": True,
             "tools": [{
                 "type": "function",
@@ -75,15 +76,17 @@ class TestStrictStreamingBuffering:
         http_client.request_with_retry = AsyncMock(return_value=upstream_response)
         http_client.close = AsyncMock()
 
+        collect_mock = AsyncMock(side_effect=ToolChoiceViolation("required tool call missing"))
         with patch("kiro.routes_openai.KiroHttpClient", return_value=http_client), \
              patch(
                  "kiro.routes_openai.collect_with_tool_choice_retry",
-                 AsyncMock(side_effect=ToolChoiceViolation("required tool call missing")),
+                 collect_mock,
              ), \
              patch("kiro.routes_openai.stream_openai_result") as stream_encoder:
             response = await chat_completions(request, request_data)
 
         assert response.status_code == 502
+        assert collect_mock.await_args.kwargs["first_token_timeout"] == 60.0
         assert json.loads(response.body)["error"]["code"] == "tool_choice_not_satisfied"
         stream_encoder.assert_not_called()
 

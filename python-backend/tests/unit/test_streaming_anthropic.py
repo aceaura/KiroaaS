@@ -292,6 +292,24 @@ class TestValidatedAnthropicResultEncoding:
         )
         assert response["stop_reason"] == "max_tokens"
 
+    def test_prefers_real_native_signature_over_placeholder(self, mock_model_cache):
+        """A native signature frame must reach the thinking block unchanged."""
+        result = StreamResult(
+            thinking_content="reasoning",
+            thinking_signature="native_sig_from_kiro",
+            completed_normally=True,
+        )
+        with patch("kiro.streaming_anthropic.FAKE_REASONING_HANDLING", "as_reasoning_content"):
+            response = format_anthropic_response_from_result(
+                result,
+                "claude-sonnet-4",
+                mock_model_cache,
+            )
+
+        thinking_block = response["content"][0]
+        assert thinking_block["type"] == "thinking"
+        assert thinking_block["signature"] == "native_sig_from_kiro"
+
 
 # ==================================================================================================
 # Tests for stream_kiro_to_anthropic()

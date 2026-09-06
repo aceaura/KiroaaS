@@ -249,6 +249,10 @@ class AwsEventStreamParser:
         ('{"followupPrompt":', 'followup'),
         ('{"usage":', 'usage'),
         ('{"contextUsagePercentage":', 'context_usage'),
+        # Native adaptive thinking frames (Kiro reasoning content events).
+        # These are top-level events distinct from {"content": ...} text.
+        ('{"text":', 'thinking'),
+        ('{"signature":', 'thinking_signature'),
     ]
     
     def __init__(self):
@@ -257,6 +261,7 @@ class AwsEventStreamParser:
         self.last_content: Optional[str] = None  # For deduplicating repeating content
         self.current_tool_call: Optional[Dict[str, Any]] = None
         self.tool_calls: List[Dict[str, Any]] = []
+        self.native_thinking_started: bool = False  # Tracks native thinking frame sequence
     
     def feed(self, chunk: bytes) -> List[Dict[str, Any]]:
         """
@@ -327,6 +332,24 @@ class AwsEventStreamParser:
             return self._process_tool_input_event(data)
         elif event_type == 'tool_stop':
             return self._process_tool_stop_event(data)
+        elif event_type == 'thinking':
+            text = data.get('text', '')
+            if not isinstance(text, str):
+                return None
+            is_first = not self.native_thinking_started
+            self.native_thinking_started = True
+            return {
+                "type": "thinking",
+                "data": text,
+                "is_first": is_first,
+                "is_native": True,
+            }
+        elif event_type == 'thinking_signature':
+            self.native_thinking_started = False
+            signature = data.get('signature', '')
+            if not isinstance(signature, str) or not signature:
+                return None
+            return {"type": "thinking_signature", "data": signature}
         elif event_type == 'usage':
             return {"type": "usage", "data": data.get('usage', 0)}
         elif event_type == 'context_usage':

@@ -27,7 +27,7 @@ Loads environment variables and provides typed access to them.
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -282,6 +282,13 @@ FALLBACK_MODELS: List[Dict[str, str]] = [
     {"modelId": "claude-opus-4.5"},
     {"modelId": "claude-opus-4.6"},
     {"modelId": "claude-opus-4.7"},
+    {"modelId": "claude-opus-4.8"},
+    {"modelId": "claude-opus-5"},
+    {"modelId": "claude-sonnet-5"},
+    {"modelId": "gpt-5.5"},
+    {"modelId": "gpt-5.6-sol"},
+    {"modelId": "gpt-5.6-terra"},
+    {"modelId": "gpt-5.6-luna"},
     {"modelId": "deepseek-3.2"},
     {"modelId": "glm-5"},
     {"modelId": "minimax-m2.1"},
@@ -364,6 +371,20 @@ STREAMING_READ_TIMEOUT: float = float(os.getenv("STREAMING_READ_TIMEOUT", "300")
 # After exhausting all attempts, an error will be returned.
 # Default: 3 attempts
 FIRST_TOKEN_MAX_RETRIES: int = int(os.getenv("FIRST_TOKEN_MAX_RETRIES", "3"))
+
+# Reasoning effort can delay the first upstream byte well beyond the normal
+# stuck-request threshold. Scale the base timeout by tier instead of retrying
+# expensive reasoning requests prematurely.
+EFFORT_FIRST_TOKEN_TIMEOUT_MULTIPLIERS: Dict[str, float] = {
+    "low": 1.5,
+    "medium": 2.0,
+    "high": 4.0,
+    "xhigh": 6.0,
+    "max": 8.0,
+}
+
+# Upper bound for effort-scaled first-token waits. Set to 0 to disable the cap.
+EFFORT_FIRST_TOKEN_TIMEOUT_CAP: float = float(os.getenv("EFFORT_FIRST_TOKEN_TIMEOUT_CAP", "120"))
 
 # ==================================================================================================
 # Debug Settings
@@ -476,6 +497,46 @@ FAKE_REASONING_OPEN_TAGS: List[str] = ["<thinking>", "<think>", "<reasoning>", "
 # Lower values = faster first token, but may miss tags with leading whitespace.
 # Default: 30 characters (enough for longest tag + some whitespace)
 FAKE_REASONING_INITIAL_BUFFER_SIZE: int = int(os.getenv("FAKE_REASONING_INITIAL_BUFFER_SIZE", "20"))
+
+
+# ==================================================================================================
+# Native Effort Schema (additionalModelRequestFields)
+# ==================================================================================================
+
+# Kiro validates additionalModelRequestFields before invoking the model. Models absent
+# from this table have no verified native channel and must not receive the field.
+MODEL_EFFORT_SCHEMA: Dict[str, Tuple[str, Tuple[str, ...]]] = {
+    "claude-opus-5": ("output_config", ("low", "medium", "high", "xhigh", "max")),
+    "claude-sonnet-5": ("output_config", ("low", "medium", "high", "xhigh", "max")),
+    "claude-opus-4.8": ("output_config", ("low", "medium", "high", "xhigh", "max")),
+    "claude-sonnet-4.6": ("output_config", ("low", "medium", "high", "max")),
+    "gpt-5.5": ("reasoning", ("none", "low", "medium", "high", "xhigh", "max")),
+    "gpt-5.6-sol": ("reasoning", ("none", "low", "medium", "high", "xhigh", "max")),
+    "gpt-5.6-terra": ("reasoning", ("none", "low", "medium", "high", "xhigh", "max")),
+    "gpt-5.6-luna": ("reasoning", ("none", "low", "medium", "high", "xhigh", "max")),
+}
+
+# Canonical qualitative tiers, from least to most reasoning.
+EFFORT_ORDER: Tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+# Safe fallback accepted by every model in MODEL_EFFORT_SCHEMA.
+EFFORT_FALLBACK: str = "medium"
+
+# OpenAI-only effort values mapped to the nearest canonical tier.
+OPENAI_EFFORT_ALIASES: Dict[str, str] = {"minimal": "low"}
+
+_NATIVE_EFFORT_RAW: str = os.getenv("NATIVE_EFFORT", "").lower()
+NATIVE_EFFORT_ENABLED: bool = _NATIVE_EFFORT_RAW not in ("false", "0", "no", "disabled", "off")
+
+_NATIVE_EFFORT_SUPPRESS_TAGS_RAW: str = os.getenv("NATIVE_EFFORT_SUPPRESS_TAGS", "").lower()
+NATIVE_EFFORT_SUPPRESS_TAGS: bool = _NATIVE_EFFORT_SUPPRESS_TAGS_RAW not in (
+    "false", "0", "no", "disabled", "off"
+)
+
+_NATIVE_EFFORT_NONE_ON_DISABLED_RAW: str = os.getenv("NATIVE_EFFORT_NONE_ON_DISABLED", "").lower()
+NATIVE_EFFORT_NONE_ON_DISABLED: bool = _NATIVE_EFFORT_NONE_ON_DISABLED_RAW not in (
+    "false", "0", "no", "disabled", "off"
+)
 
 
 # ==================================================================================================

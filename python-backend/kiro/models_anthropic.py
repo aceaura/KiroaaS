@@ -343,6 +343,14 @@ class SystemContentBlock(BaseModel):
 SystemPrompt = Union[str, List[SystemContentBlock], List[Dict[str, Any]]]
 
 
+class AnthropicOutputConfig(BaseModel):
+    """Adaptive thinking output configuration in Anthropic-compatible format."""
+
+    effort: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
 class AnthropicMessagesRequest(BaseModel):
     """
     Request to Anthropic Messages API (/v1/messages).
@@ -372,6 +380,10 @@ class AnthropicMessagesRequest(BaseModel):
 
     # Extended thinking (official Anthropic parameter)
     thinking: Optional[Dict[str, Any]] = None
+
+    # Qualitative adaptive-thinking effort used by modern Claude clients.
+    output_config: Optional[AnthropicOutputConfig] = None
+    reasoning_effort: Optional[str] = None
 
     # Tools
     tools: Optional[List[AnthropicTool]] = None

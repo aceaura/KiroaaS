@@ -49,7 +49,11 @@ from kiro.models_openai import (
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
 from kiro.model_resolver import ModelResolver
-from kiro.converters_openai import build_kiro_payload, resolve_openai_tool_choice
+from kiro.converters_openai import (
+    build_kiro_payload,
+    resolve_openai_first_token_timeout,
+    resolve_openai_tool_choice,
+)
 from kiro.streaming_openai import (
     stream_kiro_to_openai,
     collect_stream_response,
@@ -81,15 +85,15 @@ api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 async def verify_api_key(auth_header: str = Security(api_key_header)) -> bool:
     """
     Verify API key in Authorization header.
-    
+
     Expects format: "Bearer {PROXY_API_KEY}"
-    
+
     Args:
         auth_header: Authorization header value
-    
+
     Returns:
         True if key is valid
-    
+
     Raises:
         HTTPException: 401 if key is invalid or missing
     """
@@ -107,7 +111,7 @@ router = APIRouter()
 async def root():
     """
     Health check endpoint.
-    
+
     Returns:
         Status and application version
     """
@@ -122,7 +126,7 @@ async def root():
 async def health():
     """
     Detailed health check.
-    
+
     Returns:
         Status, timestamp and version
     """
@@ -136,18 +140,18 @@ async def health():
 async def get_models(request: Request):
     """
     Return list of available models.
-    
+
     Models are loaded at startup (blocking) and cached.
     This endpoint returns the cached list.
-    
+
     Args:
         request: FastAPI Request for accessing app.state
-    
+
     Returns:
         ModelList with available models in consistent format (with dots)
     """
     logger.info("Request to /v1/models")
-    
+
     # Get available models based on mode
     if request.app.state.account_system:
         # Account system: collect models from all initialized accounts
@@ -156,7 +160,7 @@ async def get_models(request: Request):
         # Legacy: use resolver from first account
         account = request.app.state.account_manager.get_first_account()
         available_model_ids = account.model_resolver.get_available_models()
-    
+
     # Build OpenAI-compatible model list
     openai_models = [
         OpenAIModel(
@@ -166,7 +170,7 @@ async def get_models(request: Request):
         )
         for model_id in available_model_ids
     ]
-    
+
     return ModelList(data=openai_models)
 
 
@@ -174,35 +178,35 @@ async def get_models(request: Request):
 async def chat_completions(request: Request, request_data: ChatCompletionRequest):
     """
     Chat completions endpoint - compatible with OpenAI API.
-    
+
     Accepts requests in OpenAI format and translates them to Kiro API.
     Supports streaming and non-streaming modes.
-    
+
     Args:
         request: FastAPI Request for accessing app.state
         request_data: Request in OpenAI ChatCompletionRequest format
-    
+
     Returns:
         StreamingResponse for streaming mode
         JSONResponse for non-streaming mode
-    
+
     Raises:
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/chat/completions (model={request_data.model}, stream={request_data.stream})")
-    
+
     # Note: prepare_new_request() and log_request_body() are now called by DebugLoggerMiddleware
     # This ensures debug logging works even for requests that fail Pydantic validation (422 errors)
-    
+
     # Check for truncation recovery opportunities
     from kiro.truncation_state import get_tool_truncation, get_content_truncation
     from kiro.truncation_recovery import generate_truncation_tool_result, generate_truncation_user_message
     from kiro.models_openai import ChatMessage
-    
+
     modified_messages = []
     tool_results_modified = 0
     content_notices_added = 0
-    
+
     for msg in request_data.messages:
         # Check if this is a tool_result for a truncated tool call
         if msg.role == "tool" and msg.tool_call_id:
@@ -216,14 +220,14 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 )
                 # Prepend truncation notice to original content
                 modified_content = f"{synthetic['content']}\n\n---\n\nOriginal tool result:\n{msg.content}"
-                
+
                 # Create NEW ChatMessage object (Pydantic immutability)
                 modified_msg = msg.model_copy(update={"content": modified_content})
                 modified_messages.append(modified_msg)
                 tool_results_modified += 1
                 logger.debug(f"Modified tool_result for {msg.tool_call_id} to include truncation notice")
                 continue  # Skip normal append since we already added modified version
-        
+
         # Check if this is an assistant message with truncated content
         if msg.role == "assistant" and msg.content and isinstance(msg.content, str):
             truncation_info = get_content_truncation(msg.content)
@@ -239,29 +243,29 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 content_notices_added += 1
                 logger.debug(f"Added truncation notice after assistant message (hash: {truncation_info.message_hash})")
                 continue  # Skip normal append since we already added it
-        
+
         modified_messages.append(msg)
-    
+
     if tool_results_modified > 0 or content_notices_added > 0:
         request_data.messages = modified_messages
         logger.info(f"Truncation recovery: modified {tool_results_modified} tool_result(s), added {content_notices_added} content notice(s)")
-    
+
     # ==============================================================================
     # WebSearch Support - Path B: Auto-Injection (MCP Tool Emulation)
     # ==============================================================================
-    
+
     # Auto-inject web_search tool if enabled (Path B - MCP emulation)
     if WEB_SEARCH_ENABLED:
         if request_data.tools is None:
             request_data.tools = []
-        
+
         # Check if web_search already exists
         has_ws = any(
             getattr(tool, "type", None) == "function" and
             getattr(getattr(tool, "function", None), "name", None) == "web_search"
             for tool in request_data.tools
         )
-        
+
         if not has_ws:
             from kiro.models_openai import Tool, ToolFunction
             web_search_tool = Tool(
@@ -288,32 +292,32 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         tool_choice_policy, _, allowed_tool_names = resolve_openai_tool_choice(request_data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    
+
     # ==============================================================================
     # Account System: Account System Failover or Legacy Mode
     # ==============================================================================
-    
+
     if request.app.state.account_system:
         # ==============================================================================
         # ACCOUNT SYSTEM ENABLED: Failover Loop
         # ==============================================================================
         from kiro.account_errors import classify_error, ErrorType
-        
+
         account_manager = request.app.state.account_manager
         all_accounts = list(account_manager._accounts.keys())
         MAX_ATTEMPTS = len(all_accounts) * 2  # Full circle with margin
-        
+
         last_error_message = None
         last_error_status = None
         tried_accounts = set()  # Track tried accounts in current failover loop
-        
+
         for attempt in range(MAX_ATTEMPTS):
             # Get next available account (excluding already tried)
             account = await account_manager.get_next_account(
                 request_data.model,
                 exclude_accounts=tried_accounts
             )
-            
+
             if account is None:
                 # All accounts unavailable
                 if len(all_accounts) == 1:
@@ -328,22 +332,22 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     if last_error_message:
                         detail += f" Error from last account: {last_error_message}"
                     raise HTTPException(status_code=503, detail=detail)
-            
+
             # Mark account as tried in current failover loop
             tried_accounts.add(account.id)
-            
+
             # Use objects from account
             auth_manager = account.auth_manager
             model_cache = account.model_cache
             model_resolver = account.model_resolver
-            
+
             # Generate conversation ID
             conversation_id = generate_conversation_id()
-            
+
             # Build payload for Kiro
             # profileArn is required by runtime.kiro.dev for all auth types
             profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
-            
+
             try:
                 kiro_payload = build_kiro_payload(
                     request_data,
@@ -352,7 +356,9 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
-            
+
+            first_token_timeout = resolve_openai_first_token_timeout(request_data)
+
             # Log Kiro payload
             try:
                 kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
@@ -360,17 +366,17 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     debug_logger.log_kiro_request_body(kiro_request_body)
             except Exception as e:
                 logger.warning(f"Failed to log Kiro request: {e}")
-            
+
             # Create HTTP client
             url = f"{auth_manager.api_host}/generateAssistantResponse"
             logger.debug(f"Kiro API URL: {url} (account: {account.id})")
-            
+
             if request_data.stream:
                 http_client = KiroHttpClient(auth_manager, shared_client=None)
             else:
                 shared_client = request.app.state.http_client
                 http_client = KiroHttpClient(auth_manager, shared_client=shared_client)
-            
+
             try:
                 # Make request to Kiro API
                 response = await http_client.request_with_retry(
@@ -379,7 +385,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     kiro_payload,
                     stream=True
                 )
-                
+
                 if response.status_code == 200:
                     # Prepare data for token counting
                     messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
@@ -400,6 +406,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                 policy=tool_choice_policy,
                                 allowed_names=allowed_tool_names,
                                 payload=kiro_payload,
+                                first_token_timeout=first_token_timeout,
                             )
                         except ToolChoiceViolation as exc:
                             await http_client.close()
@@ -461,7 +468,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
 
                     # Auto policy keeps the existing streaming and failover path.
                     await account_manager.report_success(account.id, request_data.model)
-                    
+
                     if request_data.stream:
                         # Streaming mode
                         async def stream_wrapper():
@@ -472,7 +479,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                     return await http_client.request_with_retry(
                                         "POST", url, kiro_payload, stream=True
                                     )
-                                
+
                                 async for chunk in stream_with_first_token_retry(
                                     make_request=make_retry_request,
                                     client=http_client.client,
@@ -480,6 +487,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                     model_cache=model_cache,
                                     auth_manager=auth_manager,
                                     initial_response=response,
+                                    first_token_timeout=first_token_timeout,
                                     request_messages=messages_for_tokenizer,
                                     request_tools=tools_for_tokenizer
                                 ):
@@ -509,9 +517,9 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                         debug_logger.flush_on_error(500, str(streaming_error))
                                     else:
                                         debug_logger.discard_buffers()
-                        
+
                         return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
-                    
+
                     else:
                         # Non-streaming mode
                         openai_response = await collect_stream_response(
@@ -521,27 +529,28 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                             model_cache,
                             auth_manager,
                             request_messages=messages_for_tokenizer,
-                            request_tools=tools_for_tokenizer
+                            request_tools=tools_for_tokenizer,
+                            first_token_timeout=first_token_timeout,
                         )
-                        
+
                         await http_client.close()
                         logger.info(f"HTTP 200 - POST /v1/chat/completions (non-streaming) - completed")
-                        
+
                         if debug_logger:
                             debug_logger.discard_buffers()
-                        
+
                         return JSONResponse(content=openai_response)
-                
+
                 else:
                     # ERROR - classify and decide
                     try:
                         error_content = await response.aread()
                     except Exception:
                         error_content = b"Unknown error"
-                    
+
                     await http_client.close()
                     error_text = error_content.decode('utf-8', errors='replace')
-                    
+
                     # Extract error reason and save for final return
                     error_reason = None
                     try:
@@ -555,22 +564,22 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     except (json.JSONDecodeError, KeyError):
                         last_error_message = error_text
                         last_error_status = response.status_code
-                    
+
                     # Classify error
                     error_type = classify_error(response.status_code, error_reason)
-                    
+
                     if error_type == ErrorType.FATAL:
                         # FATAL - return to client immediately
                         await account_manager.report_failure(
                             account.id, request_data.model, error_type,
                             response.status_code, error_reason
                         )
-                        
+
                         logger.warning(f"HTTP {response.status_code} - POST /v1/chat/completions - {last_error_message[:100]}")
-                        
+
                         if debug_logger:
                             debug_logger.flush_on_error(response.status_code, last_error_message)
-                        
+
                         return JSONResponse(
                             status_code=response.status_code,
                             content={
@@ -581,23 +590,23 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                 }
                             }
                         )
-                    
+
                     else:  # ErrorType.RECOVERABLE
                         # RECOVERABLE - try next account
                         await account_manager.report_failure(
                             account.id, request_data.model, error_type,
                             response.status_code, error_reason
                         )
-                        
+
                         # Single account - no point in failover, break immediately
                         if len(all_accounts) == 1:
                             break
-                        
+
                         continue  # Next iteration
-            
+
             except HTTPException as e:
                 await http_client.close()
-                
+
                 # Network errors (502/504 from request_with_retry) = RECOVERABLE
                 # These are thrown ONLY for network-level issues (timeouts, connection errors)
                 # NOT for HTTP-level errors (which are returned as response objects)
@@ -607,17 +616,17 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         account.id, request_data.model, ErrorType.RECOVERABLE,
                         e.status_code, None
                     )
-                    
+
                     last_error_message = str(e.detail)
                     last_error_status = e.status_code
-                    
+
                     # Single account - no point in failover, break immediately
                     if len(all_accounts) == 1:
                         break
-                    
+
                     logger.warning(f"Network error on account {account.id}, trying next account")
                     continue  # Try next account
-                
+
                 # All other HTTPException (400, 500, etc.) = application errors
                 # These come from build_kiro_payload() or other places → re-raise immediately
                 logger.error(f"HTTP {e.status_code} - POST /v1/chat/completions - {e.detail}")
@@ -631,7 +640,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 if debug_logger:
                     debug_logger.flush_on_error(500, str(e))
                 raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-        
+
         # All attempts exhausted
         if len(all_accounts) == 1:
             # Single account - return its original error
@@ -646,7 +655,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             if last_error_message:
                 detail += f" Error from last account: {last_error_message}"
             raise HTTPException(status_code=503, detail=detail)
-    
+
     else:
         # ==============================================================================
         # LEGACY MODE: Single Account (no failover)
@@ -658,14 +667,14 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         auth_manager = account.auth_manager
         model_cache = account.model_cache
         model_resolver = account.model_resolver
-    
+
     # Generate conversation ID for Kiro API (random UUID, not used for tracking)
     conversation_id = generate_conversation_id()
-    
+
     # Build payload for Kiro
     # profileArn is required by runtime.kiro.dev for all auth types
     profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
-    
+
     try:
         kiro_payload = build_kiro_payload(
             request_data,
@@ -674,7 +683,9 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
+    first_token_timeout = resolve_openai_first_token_timeout(request_data)
+
     # Log Kiro payload
     try:
         kiro_request_body = json.dumps(kiro_payload, ensure_ascii=False, indent=2).encode('utf-8')
@@ -682,13 +693,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             debug_logger.log_kiro_request_body(kiro_request_body)
     except Exception as e:
         logger.warning(f"Failed to log Kiro request: {e}")
-    
+
     # Create HTTP client with retry logic
     # For streaming: use per-request client to avoid CLOSE_WAIT leak on VPN disconnect (issue #54)
     # For non-streaming: use shared client for connection pooling
     url = f"{auth_manager.api_host}/generateAssistantResponse"
     logger.debug(f"Kiro API URL: {url}")
-    
+
     if request_data.stream:
         # Streaming mode: per-request client prevents orphaned connections
         # when network interface changes (VPN disconnect/reconnect)
@@ -707,16 +718,16 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             kiro_payload,
             stream=True
         )
-        
+
         if response.status_code != 200:
             try:
                 error_content = await response.aread()
             except Exception:
                 error_content = b"Unknown error"
-            
+
             await http_client.close()
             error_text = error_content.decode('utf-8', errors='replace')
-            
+
             # Try to parse JSON response from Kiro to extract error message
             error_message = error_text
             try:
@@ -729,16 +740,16 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 logger.debug(f"Original Kiro error: {error_info.original_message} (reason: {error_info.reason})")
             except (json.JSONDecodeError, KeyError):
                 pass
-            
+
             # Log access log for error (before flush, so it gets into app_logs)
             logger.warning(
                 f"HTTP {response.status_code} - POST /v1/chat/completions - {error_message[:100]}"
             )
-            
+
             # Flush debug logs on error ("errors" mode)
             if debug_logger:
                 debug_logger.flush_on_error(response.status_code, error_message)
-            
+
             # Return error in OpenAI API format
             return JSONResponse(
                 status_code=response.status_code,
@@ -750,7 +761,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     }
                 }
             )
-        
+
         # Prepare data for fallback token counting
         # Convert Pydantic models to dicts for tokenizer
         messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
@@ -771,6 +782,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     policy=tool_choice_policy,
                     allowed_names=allowed_tool_names,
                     payload=kiro_payload,
+                    first_token_timeout=first_token_timeout,
                 )
             except ToolChoiceViolation as exc:
                 await http_client.close()
@@ -813,7 +825,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     media_type="text/event-stream",
                 )
             return JSONResponse(content=openai_response)
-        
+
         if request_data.stream:
             # Streaming mode with first token retry
             async def stream_wrapper():
@@ -825,7 +837,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         return await http_client.request_with_retry(
                             "POST", url, kiro_payload, stream=True
                         )
-                    
+
                     # Use retry wrapper with initial response
                     async for chunk in stream_with_first_token_retry(
                         make_request=make_retry_request,
@@ -834,6 +846,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         model_cache=model_cache,
                         auth_manager=auth_manager,
                         initial_response=response,
+                        first_token_timeout=first_token_timeout,
                         request_messages=messages_for_tokenizer,
                         request_tools=tools_for_tokenizer
                     ):
@@ -868,11 +881,11 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                             debug_logger.flush_on_error(500, str(streaming_error))
                         else:
                             debug_logger.discard_buffers()
-            
+
             return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
-        
+
         else:
-            
+
             # Non-streaming mode - collect entire response
             openai_response = await collect_stream_response(
                 http_client.client,
@@ -881,28 +894,29 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 model_cache,
                 auth_manager,
                 request_messages=messages_for_tokenizer,
-                request_tools=tools_for_tokenizer
+                request_tools=tools_for_tokenizer,
+                first_token_timeout=first_token_timeout,
             )
-            
+
             await http_client.close()
-            
+
             # Log access log for non-streaming success
             logger.info(f"HTTP 200 - POST /v1/chat/completions (non-streaming) - completed")
-            
+
             # Write debug logs after non-streaming request completes
             if debug_logger:
                 debug_logger.discard_buffers()
-            
+
             return JSONResponse(content=openai_response)
-    
+
     except HTTPException as e:
         await http_client.close()
-        
+
         # Network errors (502/504 from request_with_retry) = RECOVERABLE
         # In legacy mode, we still log them but re-raise (no failover available)
         if e.status_code in (502, 504):
             logger.warning(f"Network error (legacy mode, no failover available)")
-        
+
         # Log access log for HTTP error
         logger.error(f"HTTP {e.status_code} - POST /v1/chat/completions - {e.detail}")
         # Flush debug logs on HTTP error ("errors" mode)
