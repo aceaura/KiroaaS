@@ -50,6 +50,7 @@ from kiro.streaming_core import (
     parse_kiro_stream,
     FirstTokenTimeoutError,
     KiroEvent,
+    StreamResult,
     calculate_tokens_from_context_usage,
     stream_with_first_token_retry as stream_with_first_token_retry_core,
 )
@@ -480,6 +481,110 @@ async def stream_kiro_to_openai(
         request_tools=request_tools
     ):
         yield chunk
+
+
+def format_openai_response_from_result(
+    result: StreamResult,
+    model: str,
+    model_cache: "ModelInfoCache",
+    request_messages: Optional[list] = None,
+    request_tools: Optional[list] = None,
+) -> dict:
+    """Format a fully validated result as an OpenAI chat completion."""
+    completion_tokens = count_tokens(result.content + result.thinking_content)
+    prompt_tokens, total_tokens, _, _ = calculate_tokens_from_context_usage(
+        result.context_usage_percentage,
+        completion_tokens,
+        model_cache,
+        model,
+    )
+    if result.context_usage_percentage is None and request_messages:
+        prompt_tokens = count_message_tokens(request_messages, apply_claude_correction=False)
+        if request_tools:
+            prompt_tokens += count_tools_tokens(request_tools, apply_claude_correction=False)
+        total_tokens = prompt_tokens + completion_tokens
+
+    message = {"role": "assistant", "content": result.content}
+    if result.thinking_content:
+        if FAKE_REASONING_HANDLING == "as_reasoning_content":
+            message["reasoning_content"] = result.thinking_content
+        elif FAKE_REASONING_HANDLING == "include_as_text":
+            message["content"] = result.thinking_content + result.content
+    if result.tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": call.get("id"),
+                "type": call.get("type", "function"),
+                "function": {
+                    "name": (call.get("function") or {}).get("name", ""),
+                    "arguments": (call.get("function") or {}).get("arguments", "{}"),
+                },
+            }
+            for call in result.tool_calls
+        ]
+
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+    if result.usage:
+        usage["credits_used"] = result.usage
+    completed_normally = (
+        result.completed_normally
+        or result.usage is not None
+        or result.context_usage_percentage is not None
+    )
+    if result.tool_calls:
+        finish_reason = "tool_calls"
+    elif result.content and not completed_normally:
+        finish_reason = "length"
+    else:
+        finish_reason = "stop"
+
+    return {
+        "id": generate_completion_id(),
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+        "usage": usage,
+    }
+
+
+async def stream_openai_result(response: dict) -> AsyncGenerator[str, None]:
+    """Encode a validated OpenAI completion as buffered protocol SSE."""
+    choice = response["choices"][0]
+    message = choice["message"]
+    delta = {key: value for key, value in message.items() if key != "role"}
+    delta["role"] = "assistant"
+    if "tool_calls" in delta:
+        delta["tool_calls"] = [
+            {"index": index, **tool_call}
+            for index, tool_call in enumerate(delta["tool_calls"])
+        ]
+    chunk = {
+        "id": response["id"],
+        "object": "chat.completion.chunk",
+        "created": response["created"],
+        "model": response["model"],
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+    }
+    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+    final_chunk = {
+        "id": response["id"],
+        "object": "chat.completion.chunk",
+        "created": response["created"],
+        "model": response["model"],
+        "choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}],
+        "usage": response["usage"],
+    }
+    yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 async def stream_with_first_token_retry(

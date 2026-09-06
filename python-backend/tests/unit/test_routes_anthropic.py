@@ -13,13 +13,168 @@ For OpenAI API tests, see test_routes_openai.py.
 import pytest
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from datetime import datetime, timezone
+from types import SimpleNamespace
 import json
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
-from kiro.routes_anthropic import verify_anthropic_api_key, router
+from kiro.routes_anthropic import messages, verify_anthropic_api_key, router
 from kiro.config import PROXY_API_KEY
+from kiro.models_anthropic import AnthropicMessagesRequest
+from kiro.streaming_core import StreamResult, ToolChoiceUpstreamError, ToolChoiceViolation
+
+
+# =============================================================================
+# Tests for strict streaming buffering
+# =============================================================================
+
+class TestStrictStreamingBuffering:
+    """Tests that strict semantic validation completes before SSE starts."""
+
+    @pytest.mark.asyncio
+    async def test_validation_failure_returns_502_without_sse_output(self):
+        """Return a buffered protocol error without invoking the SSE encoder."""
+        auth_manager = MagicMock(
+            api_host="https://api.example.com",
+            profile_arn="arn:test",
+        )
+        account = MagicMock(
+            auth_manager=auth_manager,
+            model_cache=MagicMock(),
+            model_resolver=MagicMock(),
+        )
+        account_manager = MagicMock()
+        account_manager.get_first_account.return_value = account
+        app = SimpleNamespace(state=SimpleNamespace(
+            account_system=False,
+            account_manager=account_manager,
+            http_client=MagicMock(),
+        ))
+        request = Request({"type": "http", "app": app})
+        request_data = AnthropicMessagesRequest.model_validate({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Use the tool"}],
+            "stream": True,
+            "tools": [{
+                "name": "get_weather",
+                "input_schema": {"type": "object"},
+            }],
+            "tool_choice": {"type": "any"},
+        })
+        upstream_response = MagicMock(status_code=200)
+        http_client = MagicMock()
+        http_client.request_with_retry = AsyncMock(return_value=upstream_response)
+        http_client.close = AsyncMock()
+
+        with patch("kiro.routes_anthropic.KiroHttpClient", return_value=http_client), \
+             patch(
+                 "kiro.routes_anthropic.collect_with_tool_choice_retry",
+                 AsyncMock(side_effect=ToolChoiceViolation("required tool call missing")),
+             ), \
+             patch("kiro.routes_anthropic.stream_anthropic_result") as stream_encoder:
+            response = await messages(request, request_data)
+
+        assert response.status_code == 502
+        assert json.loads(response.body)["error"]["type"] == "tool_choice_not_satisfied"
+        stream_encoder.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retry_upstream_error_preserves_status(self):
+        auth_manager = MagicMock(
+            api_host="https://api.example.com",
+            profile_arn="arn:test",
+        )
+        account = MagicMock(
+            auth_manager=auth_manager,
+            model_cache=MagicMock(),
+            model_resolver=MagicMock(),
+        )
+        account_manager = MagicMock()
+        account_manager.get_first_account.return_value = account
+        app = SimpleNamespace(state=SimpleNamespace(
+            account_system=False,
+            account_manager=account_manager,
+            http_client=MagicMock(),
+        ))
+        request = Request({"type": "http", "app": app})
+        request_data = AnthropicMessagesRequest.model_validate({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Use the tool"}],
+            "tools": [{
+                "name": "get_weather",
+                "input_schema": {"type": "object"},
+            }],
+            "tool_choice": {"type": "any"},
+        })
+        upstream_response = MagicMock(status_code=200)
+        http_client = MagicMock()
+        http_client.request_with_retry = AsyncMock(return_value=upstream_response)
+        http_client.close = AsyncMock()
+
+        with patch("kiro.routes_anthropic.KiroHttpClient", return_value=http_client), \
+             patch(
+                 "kiro.routes_anthropic.collect_with_tool_choice_retry",
+                 AsyncMock(side_effect=ToolChoiceUpstreamError(429, "rate limited")),
+             ):
+            response = await messages(request, request_data)
+
+        body = json.loads(response.body)
+        assert response.status_code == 429
+        assert body["error"]["type"] == "api_error"
+
+    @pytest.mark.asyncio
+    async def test_native_web_search_does_not_bypass_none_policy(self):
+        auth_manager = MagicMock(
+            api_host="https://api.example.com",
+            profile_arn="arn:test",
+        )
+        account = MagicMock(
+            auth_manager=auth_manager,
+            model_cache=MagicMock(),
+            model_resolver=MagicMock(),
+        )
+        account_manager = MagicMock()
+        account_manager.get_first_account.return_value = account
+        app = SimpleNamespace(state=SimpleNamespace(
+            account_system=False,
+            account_manager=account_manager,
+            http_client=MagicMock(),
+        ))
+        request = Request({"type": "http", "app": app})
+        request_data = AnthropicMessagesRequest.model_validate({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Do not search"}],
+            "tools": [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+            }],
+            "tool_choice": {"type": "none"},
+        })
+        upstream_response = MagicMock(status_code=200)
+        http_client = MagicMock()
+        http_client.request_with_retry = AsyncMock(return_value=upstream_response)
+        http_client.close = AsyncMock()
+
+        with patch("kiro.routes_anthropic.KiroHttpClient", return_value=http_client), \
+             patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={
+                 "conversationState": {
+                     "currentMessage": {"userInputMessage": {"content": "Do not search"}}
+                 }
+             }), \
+             patch(
+                 "kiro.routes_anthropic.collect_with_tool_choice_retry",
+                 AsyncMock(return_value=StreamResult(content="No search", completed_normally=True)),
+             ), \
+             patch("kiro.routes_anthropic.handle_native_web_search", AsyncMock()) as native_handler:
+            response = await messages(request, request_data)
+
+        assert response.status_code == 200
+        native_handler.assert_not_awaited()
 
 
 # =============================================================================

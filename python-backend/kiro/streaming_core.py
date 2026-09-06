@@ -31,8 +31,10 @@ to convert Kiro events to their respective SSE formats.
 """
 
 import asyncio
+import copy
+import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Awaitable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Awaitable, Dict, List, Optional, Set, Tuple
 
 import httpx
 from loguru import logger
@@ -104,11 +106,151 @@ class StreamResult:
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     usage: Optional[Dict[str, Any]] = None
     context_usage_percentage: Optional[float] = None
+    completed_normally: bool = False
 
 
 class FirstTokenTimeoutError(Exception):
     """Exception raised when first token timeout occurs."""
     pass
+
+
+class ToolChoiceViolation(Exception):
+    """Raised when an upstream response violates the requested tool policy."""
+
+    code = "tool_choice_not_satisfied"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(f"{self.code}: {message}")
+        self.message = message
+
+
+class ToolChoiceUpstreamError(Exception):
+    """Raised when the strict retry request returns a non-success status."""
+
+    def __init__(self, status_code: int, body: str) -> None:
+        super().__init__(f"Upstream API error ({status_code}): {body}")
+        self.status_code = status_code
+        self.body = body
+
+
+def _tool_call_parts(tool_call: Dict[str, Any]) -> Tuple[str, Any]:
+    """Extract a client-visible tool name and raw input from a tool call."""
+    function = tool_call.get("function")
+    if isinstance(function, dict):
+        return function.get("name", ""), function.get("arguments", {})
+    return tool_call.get("name", ""), tool_call.get("input", {})
+
+
+def validate_tool_choice_result(
+    result: StreamResult,
+    policy: "ToolChoicePolicy",
+    allowed_names: Set[str],
+) -> StreamResult:
+    """Validate and normalize a complete result against a tool-choice policy."""
+    normalized_calls: List[Dict[str, Any]] = []
+    returned_names: List[str] = []
+
+    for tool_call in result.tool_calls:
+        name, raw_arguments = _tool_call_parts(tool_call)
+        if not name or name not in allowed_names:
+            raise ToolChoiceViolation(f"response returned disallowed tool {name!r}")
+        if tool_call.get("_arguments_invalid"):
+            raise ToolChoiceViolation(f"tool {name!r} returned malformed JSON arguments")
+
+        if isinstance(raw_arguments, str):
+            try:
+                arguments = json.loads(raw_arguments)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ToolChoiceViolation(
+                    f"tool {name!r} arguments are not valid JSON"
+                ) from exc
+        else:
+            arguments = raw_arguments
+        if not isinstance(arguments, dict):
+            raise ToolChoiceViolation(f"tool {name!r} arguments must be a JSON object")
+
+        normalized = copy.deepcopy(tool_call)
+        function = normalized.get("function")
+        if isinstance(function, dict):
+            function["arguments"] = json.dumps(arguments, ensure_ascii=False)
+        else:
+            normalized["input"] = arguments
+        normalized_calls.append(normalized)
+        returned_names.append(name)
+
+    if policy.mode == "none" and normalized_calls:
+        raise ToolChoiceViolation("tool_choice none returned one or more tools")
+    if policy.mode == "required" and not normalized_calls:
+        raise ToolChoiceViolation("tool_choice required returned no tools")
+    if policy.mode == "named":
+        if not normalized_calls:
+            raise ToolChoiceViolation(f"required tool {policy.tool_name!r} was not called")
+        if any(name != policy.tool_name for name in returned_names):
+            raise ToolChoiceViolation(
+                f"response called a tool other than required tool {policy.tool_name!r}"
+            )
+
+    result.tool_calls = normalized_calls
+    return result
+
+
+def add_tool_choice_recovery_directive(
+    payload: Dict[str, Any],
+    policy: "ToolChoicePolicy",
+    violation: ToolChoiceViolation,
+) -> Dict[str, Any]:
+    """Return a copied payload with a one-shot current-turn recovery directive."""
+    recovered = copy.deepcopy(payload)
+    user_input = recovered["conversationState"]["currentMessage"]["userInputMessage"]
+    directive = (
+        "\n\n[Tool Policy Recovery] Your previous response violated the tool policy "
+        f"({violation.message}). Retry THIS response now. {policy.build_directive().strip()}"
+    )
+    user_input["content"] = f"{user_input.get('content', '')}{directive}"
+    return recovered
+
+
+async def collect_with_tool_choice_retry(
+    make_request: Callable[[Dict[str, Any]], Awaitable[httpx.Response]],
+    initial_response: httpx.Response,
+    policy: "ToolChoicePolicy",
+    allowed_names: Set[str],
+    payload: Dict[str, Any],
+) -> StreamResult:
+    """Buffer, validate, and retry one semantic violation on the same request path."""
+    response = initial_response
+    request_payload = payload
+
+    for attempt in range(2):
+        try:
+            if response.status_code != 200:
+                body = (await response.aread()).decode("utf-8", errors="replace")
+                raise ToolChoiceUpstreamError(response.status_code, body)
+            result = await collect_stream_to_result(response)
+            return validate_tool_choice_result(result, policy, allowed_names)
+        except ToolChoiceViolation as violation:
+            if attempt == 1:
+                raise
+            logger.warning("Strict tool_choice validation failed; retrying once: {}", violation)
+            request_payload = add_tool_choice_recovery_directive(
+                request_payload,
+                policy,
+                violation,
+            )
+        finally:
+            try:
+                await response.aclose()
+            except Exception:
+                pass
+
+        try:
+            response = await make_request(request_payload)
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", 502)
+            detail = getattr(exc, "detail", str(exc))
+            raise ToolChoiceUpstreamError(status_code, str(detail)) from exc
+
+    raise ToolChoiceViolation("tool policy retry exhausted")
 
 
 # ==================================================================================================
@@ -317,10 +459,12 @@ async def collect_stream_to_result(
             full_content_for_bracket_tools += event.thinking_content
         elif event.type == "tool_use" and event.tool_use:
             result.tool_calls.append(event.tool_use)
-        elif event.type == "usage" and event.usage:
+        elif event.type == "usage" and event.usage is not None:
             result.usage = event.usage
+            result.completed_normally = True
         elif event.type == "context_usage" and event.context_usage_percentage is not None:
             result.context_usage_percentage = event.context_usage_percentage
+            result.completed_normally = True
     
     # Check for bracket-style tool calls in full content
     bracket_tool_calls = parse_bracket_tool_calls(full_content_for_bracket_tools)

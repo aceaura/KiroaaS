@@ -22,6 +22,8 @@ from kiro.streaming_anthropic import (
     format_sse_event,
     stream_kiro_to_anthropic,
     collect_anthropic_response,
+    format_anthropic_response_from_result,
+    stream_anthropic_result,
     stream_with_first_token_retry_anthropic,
 )
 from kiro.streaming_core import KiroEvent, StreamResult
@@ -212,6 +214,83 @@ class TestFormatSseEvent:
         assert parsed["type"] == "message_delta"
         assert parsed["delta"]["stop_reason"] == "end_turn"
         print("✓ JSON data is valid and parseable")
+
+
+# ==================================================================================================
+# Tests for validated result SSE encoding
+# ==================================================================================================
+
+class TestValidatedAnthropicResultEncoding:
+    """Tests for buffered SSE encoding after strict tool-choice validation."""
+
+    @pytest.mark.asyncio
+    async def test_encodes_validated_tool_call_as_protocol_sse(self, mock_model_cache):
+        """Encode a complete validated result without reading an upstream stream."""
+        result = StreamResult(
+            content="",
+            thinking_content="",
+            tool_calls=[{
+                "id": "toolu_weather",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": '{"city":"Paris"}',
+                },
+            }],
+            usage=None,
+            context_usage_percentage=5.0,
+        )
+
+        response = format_anthropic_response_from_result(
+            result,
+            "claude-sonnet-4",
+            mock_model_cache,
+        )
+        events = [event async for event in stream_anthropic_result(response)]
+        event_data = [
+            json.loads(event.split("data: ", 1)[1])
+            for event in events
+        ]
+
+        assert event_data[0]["type"] == "message_start"
+        tool_start = event_data[1]
+        assert tool_start["content_block"]["type"] == "tool_use"
+        assert tool_start["content_block"]["name"] == "get_weather"
+        assert json.loads(event_data[2]["delta"]["partial_json"]) == {"city": "Paris"}
+        assert event_data[-2]["delta"]["stop_reason"] == "tool_use"
+        assert event_data[-1]["type"] == "message_stop"
+
+    @pytest.mark.asyncio
+    async def test_streams_thinking_signature_as_delta(self, mock_model_cache):
+        result = StreamResult(
+            thinking_content="reasoning",
+            completed_normally=True,
+        )
+        with patch("kiro.streaming_anthropic.FAKE_REASONING_HANDLING", "as_reasoning_content"):
+            response = format_anthropic_response_from_result(
+                result,
+                "claude-sonnet-4",
+                mock_model_cache,
+            )
+            events = [event async for event in stream_anthropic_result(response)]
+
+        event_data = [json.loads(event.split("data: ", 1)[1]) for event in events]
+        thinking_start = event_data[1]["content_block"]
+        assert thinking_start["signature"] == ""
+        assert event_data[2]["delta"] == {
+            "type": "thinking_delta",
+            "thinking": "reasoning",
+        }
+        assert event_data[3]["delta"]["type"] == "signature_delta"
+        assert event_data[3]["delta"]["signature"].startswith("sig_")
+
+    def test_marks_incomplete_buffered_text_as_max_tokens(self, mock_model_cache):
+        response = format_anthropic_response_from_result(
+            StreamResult(content="cut off"),
+            "claude-sonnet-4",
+            mock_model_cache,
+        )
+        assert response["stop_reason"] == "max_tokens"
 
 
 # ==================================================================================================

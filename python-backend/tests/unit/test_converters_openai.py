@@ -19,6 +19,7 @@ from kiro.converters_openai import (
     _extract_images_from_tool_message,
     reasoning_effort_to_budget,
     extract_thinking_config_from_openai,
+    resolve_openai_tool_choice,
 )
 from kiro.models_openai import ChatMessage, ChatCompletionRequest, Tool, ToolFunction
 
@@ -1872,3 +1873,29 @@ class TestBuildKiroPayloadIntegration:
         print(f"Checking for <max_thinking_length>{expected_budget}</max_thinking_length>...")
         assert f"<max_thinking_length>{expected_budget}</max_thinking_length>" in content
         assert "<thinking_mode>enabled</thinking_mode>" in content
+
+
+class TestStrictOpenAIToolChoiceIntegration:
+    """Tests for strict OpenAI tool-choice payload integration."""
+
+    def test_named_choice_filters_payload_tools(self):
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4.5",
+            messages=[ChatMessage(role="user", content="Read the file")],
+            tools=[
+                Tool(type="function", function=ToolFunction(name="Read", parameters={})),
+                Tool(type="function", function=ToolFunction(name="Bash", parameters={})),
+            ],
+            tool_choice={"type": "function", "function": {"name": "Read"}},
+        )
+
+        policy, selected, allowed = resolve_openai_tool_choice(request)
+        payload = build_kiro_payload(request, "strict-openai", "")
+        user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
+        specifications = user_input["userInputMessageContext"]["tools"]
+
+        assert policy.mode == "named"
+        assert [tool.name for tool in selected] == ["Read"]
+        assert allowed == {"Read"}
+        assert [item["toolSpecification"]["name"] for item in specifications] == ["Read"]
+        assert "MUST call the tool named 'Read'" in user_input["content"]

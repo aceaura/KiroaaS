@@ -26,9 +26,11 @@ Anthropic's Messages API specification.
 Reference: https://docs.anthropic.com/en/api/messages
 """
 
+import json
 import time
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field, model_validator
+from loguru import logger
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ==================================================================================================
@@ -70,12 +72,49 @@ class ToolUseContentBlock(BaseModel):
     Tool use content block in Anthropic format.
 
     Represents a tool call made by the assistant.
+
+    The ``input`` field is declared as a dict per the Anthropic spec, but
+    upstreams that bridge GPT models through the OpenAI format sometimes
+    emit raw argument strings (e.g. ``":"``). A validator coerces those
+    strings back to a dict so a single malformed tool call does not fail
+    the whole conversation with a 422.
     """
 
     type: Literal["tool_use"] = "tool_use"
     id: str
     name: str
     input: Dict[str, Any]
+
+    @field_validator("input", mode="before")
+    @classmethod
+    def coerce_string_input(cls, value: Any) -> Any:
+        """Coerce a string tool input to a dict.
+
+        Strings that hold valid JSON objects are parsed; anything else
+        (invalid JSON, JSON arrays/scalars) degrades to an empty object
+        with a warning instead of rejecting the request.
+        """
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                logger.warning("tool_use input is an empty string, coercing to {}")
+                return {}
+            try:
+                parsed = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning(
+                    "tool_use input string is not valid JSON, coercing to {}: "
+                    f"{stripped[:80]!r}"
+                )
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+            logger.warning(
+                "tool_use input JSON is not an object, coercing to {}: "
+                f"{stripped[:80]!r}"
+            )
+            return {}
+        return value
 
 
 class ToolReferenceContentBlock(BaseModel):
@@ -252,12 +291,21 @@ class ToolChoiceAuto(BaseModel):
     """Auto tool choice - model decides whether to use tools."""
 
     type: Literal["auto"] = "auto"
+    model_config = {"extra": "forbid"}
 
 
 class ToolChoiceAny(BaseModel):
     """Any tool choice - model must use at least one tool."""
 
     type: Literal["any"] = "any"
+    model_config = {"extra": "forbid"}
+
+
+class ToolChoiceNone(BaseModel):
+    """No tool choice - model must not use tools for this response."""
+
+    type: Literal["none"] = "none"
+    model_config = {"extra": "forbid"}
 
 
 class ToolChoiceTool(BaseModel):
@@ -265,9 +313,10 @@ class ToolChoiceTool(BaseModel):
 
     type: Literal["tool"] = "tool"
     name: str
+    model_config = {"extra": "forbid"}
 
 
-ToolChoice = Union[ToolChoiceAuto, ToolChoiceAny, ToolChoiceTool]
+ToolChoice = Union[ToolChoiceAuto, ToolChoiceAny, ToolChoiceNone, ToolChoiceTool]
 
 
 # ==================================================================================================

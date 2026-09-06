@@ -26,8 +26,12 @@ from kiro.streaming_core import (
     collect_stream_to_result,
     calculate_tokens_from_context_usage,
     stream_with_first_token_retry,
+    validate_tool_choice_result,
+    collect_with_tool_choice_retry,
+    ToolChoiceViolation,
     _process_chunk,
 )
+from kiro.converters_core import ToolChoicePolicy
 
 
 # ==================================================================================================
@@ -1481,6 +1485,139 @@ class TestStreamWithFirstTokenRetryCore:
         assert "429" in str(exc_info.value)
         assert "Rate limited" in str(exc_info.value)
         print("✓ Custom HTTP error callback used correctly")
+
+
+class TestStrictToolChoiceValidation:
+    """Tests for complete-result validation and one semantic retry."""
+
+    @staticmethod
+    def tool_result(name="Read", arguments='{"path": "file.txt"}'):
+        return StreamResult(tool_calls=[{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }])
+
+    def test_none_rejects_tool_calls(self):
+        with pytest.raises(ToolChoiceViolation, match="tool_choice_not_satisfied"):
+            validate_tool_choice_result(
+                self.tool_result(),
+                ToolChoicePolicy(mode="none"),
+                set(),
+            )
+
+    def test_required_rejects_missing_tool(self):
+        with pytest.raises(ToolChoiceViolation, match="returned no tools"):
+            validate_tool_choice_result(
+                StreamResult(content="text only"),
+                ToolChoicePolicy(mode="required"),
+                {"Read"},
+            )
+
+    def test_named_rejects_other_tool(self):
+        with pytest.raises(ToolChoiceViolation):
+            validate_tool_choice_result(
+                self.tool_result(name="Bash"),
+                ToolChoicePolicy(mode="named", tool_name="Read"),
+                {"Read"},
+            )
+
+    @pytest.mark.parametrize("arguments", ["[]", '"text"', "not-json"])
+    def test_rejects_non_object_arguments(self, arguments):
+        with pytest.raises(ToolChoiceViolation, match="arguments"):
+            validate_tool_choice_result(
+                self.tool_result(arguments=arguments),
+                ToolChoicePolicy(mode="required"),
+                {"Read"},
+            )
+
+    def test_accepts_and_normalizes_valid_named_tool(self):
+        result = validate_tool_choice_result(
+            self.tool_result(),
+            ToolChoicePolicy(mode="named", tool_name="Read"),
+            {"Read"},
+        )
+        assert result.tool_calls[0]["function"]["arguments"] == '{"path": "file.txt"}'
+
+    @pytest.mark.asyncio
+    async def test_collection_records_completion_signal(self):
+        response = AsyncMock()
+        response.aclose = AsyncMock()
+
+        async def events(*args, **kwargs):
+            yield KiroEvent(type="content", content="done")
+            yield KiroEvent(type="usage", usage={})
+
+        with patch("kiro.streaming_core.parse_kiro_stream", events):
+            result = await collect_stream_to_result(response)
+
+        assert result.content == "done"
+        assert result.usage == {}
+        assert result.completed_normally is True
+
+    @pytest.mark.asyncio
+    async def test_retries_first_violation_then_succeeds(self):
+        initial = AsyncMock(status_code=200)
+        initial.aclose = AsyncMock()
+        retry = AsyncMock(status_code=200)
+        retry.aclose = AsyncMock()
+        make_request = AsyncMock(return_value=retry)
+        policy = ToolChoicePolicy(mode="required")
+        payload = {
+            "conversationState": {
+                "currentMessage": {"userInputMessage": {"content": "Use a tool"}}
+            }
+        }
+
+        with patch(
+            "kiro.streaming_core.collect_stream_to_result",
+            side_effect=[StreamResult(content="text only"), self.tool_result()],
+        ):
+            result = await collect_with_tool_choice_retry(
+                make_request,
+                initial,
+                policy,
+                {"Read"},
+                payload,
+            )
+
+        assert result.tool_calls[0]["function"]["name"] == "Read"
+        make_request.assert_awaited_once()
+        retry_payload = make_request.await_args.args[0]
+        assert "[Tool Policy Recovery]" in retry_payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "[Tool Policy Recovery]" not in payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        initial.aclose.assert_awaited_once()
+        retry.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_two_violations_fail_after_one_retry(self):
+        initial = AsyncMock(status_code=200)
+        initial.aclose = AsyncMock()
+        retry = AsyncMock(status_code=200)
+        retry.aclose = AsyncMock()
+        make_request = AsyncMock(return_value=retry)
+        payload = {
+            "conversationState": {
+                "currentMessage": {"userInputMessage": {"content": "Use a tool"}}
+            }
+        }
+
+        with patch(
+            "kiro.streaming_core.collect_stream_to_result",
+            side_effect=[StreamResult(), StreamResult()],
+        ):
+            with pytest.raises(ToolChoiceViolation, match="tool_choice_not_satisfied"):
+                await collect_with_tool_choice_retry(
+                    make_request,
+                    initial,
+                    ToolChoicePolicy(mode="required"),
+                    {"Read"},
+                    payload,
+                )
+
+        make_request.assert_awaited_once()
+        initial.aclose.assert_awaited_once()
+        retry.aclose.assert_awaited_once()
     
     @pytest.mark.asyncio
     async def test_closes_response_on_timeout(self):

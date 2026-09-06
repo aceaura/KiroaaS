@@ -386,6 +386,40 @@ class TestDeduplicateToolCalls:
         call_1 = next(tc for tc in result if tc["id"] == "call_1")
         assert call_1["function"]["arguments"] == '{"x": 1}'
 
+    def test_preserves_invalid_argument_marker_for_empty_duplicate(self):
+        tool_calls = [
+            {"id": "call_1", "function": {"name": "Read", "arguments": "{}"}},
+            {
+                "id": "call_1",
+                "function": {"name": "Read", "arguments": "{}"},
+                "_arguments_invalid": True,
+            },
+        ]
+
+        result = deduplicate_tool_calls(tool_calls)
+
+        assert len(result) == 1
+        assert result[0]["_arguments_invalid"] is True
+
+    def test_valid_non_empty_duplicate_supersedes_invalid_marker(self):
+        tool_calls = [
+            {
+                "id": "call_1",
+                "function": {"name": "Read", "arguments": "{}"},
+                "_arguments_invalid": True,
+            },
+            {
+                "id": "call_1",
+                "function": {"name": "Read", "arguments": '{"path":"a"}'},
+            },
+        ]
+
+        result = deduplicate_tool_calls(tool_calls)
+
+        assert len(result) == 1
+        assert "_arguments_invalid" not in result[0]
+        assert result[0]["function"]["arguments"] == '{"path":"a"}'
+
 
 class TestAwsEventStreamParserInitialization:
     """Tests for AwsEventStreamParser initialization."""

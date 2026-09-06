@@ -29,7 +29,7 @@ Contains functions for:
 - Building Kiro payload from OpenAI requests
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -44,7 +44,9 @@ from kiro.converters_core import (
     UnifiedMessage,
     UnifiedTool,
     ThinkingConfig,
+    ToolChoicePolicy,
     build_kiro_payload as core_build_kiro_payload,
+    parse_tool_choice_policy,
 )
 
 
@@ -293,6 +295,17 @@ def convert_openai_tools_to_unified(tools: Optional[List[Tool]]) -> Optional[Lis
     return unified_tools if unified_tools else None
 
 
+def resolve_openai_tool_choice(
+    request: ChatCompletionRequest,
+) -> Tuple[ToolChoicePolicy, Optional[List[UnifiedTool]], Set[str]]:
+    """Resolve policy, upstream tools, and client-visible allowed names."""
+    unified_tools = convert_openai_tools_to_unified(request.tools)
+    policy = parse_tool_choice_policy(request.tool_choice, unified_tools, "openai")
+    selected_tools = policy.filter_tools(unified_tools)
+    allowed_names = {tool.name for tool in selected_tools or []}
+    return policy, selected_tools, allowed_names
+
+
 # ==================================================================================================
 # Thinking Configuration Extraction
 # ==================================================================================================
@@ -414,9 +427,13 @@ def build_kiro_payload(
     """
     # Convert messages to unified format
     system_prompt, unified_messages = convert_openai_messages_to_unified(request_data.messages)
-    
-    # Convert tools to unified format
-    unified_tools = convert_openai_tools_to_unified(request_data.tools)
+
+    # Resolve against original client-visible names before extension aliasing.
+    tool_choice_policy, unified_tools, _ = resolve_openai_tool_choice(request_data)
+
+    tool_choice_directive = tool_choice_policy.build_directive()
+    if tool_choice_directive:
+        system_prompt = system_prompt + tool_choice_directive if system_prompt else tool_choice_directive.strip()
     
     # Get model ID for Kiro API (normalizes + resolves hidden models)
     # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid
@@ -440,7 +457,7 @@ def build_kiro_payload(
         tools=unified_tools,
         conversation_id=conversation_id,
         profile_arn=profile_arn,
-        thinking_config=thinking_config
+        thinking_config=thinking_config,
     )
     
     return result.payload

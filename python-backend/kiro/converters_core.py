@@ -131,6 +131,112 @@ class KiroPayloadResult:
     tool_documentation: str = ""
 
 
+@dataclass(frozen=True)
+class ToolChoicePolicy:
+    """Normalized tool-selection policy shared by both client protocols."""
+
+    mode: str = "auto"
+    tool_name: Optional[str] = None
+
+    @property
+    def is_strict(self) -> bool:
+        """Return whether the response must be buffered and validated."""
+        return self.mode != "auto"
+
+    def filter_tools(self, tools: Optional[List[UnifiedTool]]) -> Optional[List[UnifiedTool]]:
+        """Return the tools that may be sent upstream for this policy."""
+        if self.mode == "none":
+            return None
+        if self.mode == "named":
+            return [tool for tool in tools or [] if tool.name == self.tool_name]
+        return tools
+
+    def build_directive(self) -> str:
+        """Build the prompt directive used because Kiro has no tool-choice field."""
+        if self.mode == "none":
+            return (
+                "\n\n[Tool Policy] For THIS response you must NOT call any tool. "
+                "Reply with plain content only."
+            )
+        if self.mode == "required":
+            return (
+                "\n\n[Tool Policy] For THIS response you MUST call at least one tool. "
+                "Do not reply with text only."
+            )
+        if self.mode == "named" and self.tool_name:
+            return (
+                f"\n\n[Tool Policy] For THIS response you MUST call the tool named "
+                f"'{self.tool_name}'. Do not call any other tool and do not reply with text only."
+            )
+        return ""
+
+
+def parse_tool_choice_policy(
+    tool_choice: Any,
+    tools: Optional[List[UnifiedTool]],
+    protocol: str,
+) -> ToolChoicePolicy:
+    """Validate and normalize an OpenAI or Anthropic tool-choice value.
+
+    Args:
+        tool_choice: Raw tool-choice value from the client request.
+        tools: Tools using their original client-visible names.
+        protocol: Either ``openai`` or ``anthropic``.
+
+    Raises:
+        ValueError: If the value is malformed or cannot be satisfied.
+    """
+    if protocol not in ("openai", "anthropic"):
+        raise ValueError(f"Unsupported tool_choice protocol: {protocol}")
+
+    raw = tool_choice
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump(exclude_none=True)
+    elif hasattr(raw, "dict") and not isinstance(raw, dict):
+        raw = raw.dict(exclude_none=True)
+
+    mode = "auto"
+    tool_name: Optional[str] = None
+
+    if raw is None:
+        pass
+    elif protocol == "openai" and isinstance(raw, str):
+        if raw not in ("auto", "none", "required"):
+            raise ValueError(f"Invalid OpenAI tool_choice value: {raw!r}")
+        mode = raw
+    elif protocol == "openai" and isinstance(raw, dict):
+        function = raw.get("function")
+        if raw.get("type") != "function" or not isinstance(function, dict):
+            raise ValueError("OpenAI named tool_choice must contain type='function' and a function object")
+        tool_name = function.get("name")
+        if not isinstance(tool_name, str) or not tool_name:
+            raise ValueError("OpenAI named tool_choice requires a non-empty function.name")
+        mode = "named"
+    elif protocol == "anthropic" and isinstance(raw, dict):
+        choice_type = raw.get("type")
+        if choice_type not in ("auto", "any", "none", "tool"):
+            raise ValueError(f"Invalid Anthropic tool_choice type: {choice_type!r}")
+        if choice_type == "tool":
+            tool_name = raw.get("name")
+            if not isinstance(tool_name, str) or not tool_name:
+                raise ValueError("Anthropic tool_choice type='tool' requires a non-empty name")
+            mode = "named"
+        else:
+            if "name" in raw:
+                raise ValueError(f"Anthropic tool_choice type={choice_type!r} must not include name")
+            mode = "required" if choice_type == "any" else choice_type
+    else:
+        raise ValueError(f"Invalid {protocol} tool_choice structure")
+
+    available_names = {tool.name for tool in tools or []}
+    if mode == "required" and not available_names:
+        raise ValueError("tool_choice requires at least one tool, but no tools were provided")
+    if mode == "named" and tool_name not in available_names:
+        raise ValueError(f"tool_choice references unknown tool {tool_name!r}")
+
+    return ToolChoicePolicy(mode=mode, tool_name=tool_name)
+
+
 # ==================================================================================================
 # Text Content Extraction
 # ==================================================================================================
@@ -769,6 +875,48 @@ def extract_tool_results_from_content(content: Any) -> List[Dict[str, Any]]:
     return tool_results
 
 
+def coerce_tool_input_to_dict(raw: Any) -> Dict[str, Any]:
+    """
+    Coerces a tool-call input/arguments value to a dict for the Kiro API.
+
+    Kiro requires tool inputs to be JSON objects, but OpenAI-format
+    ``arguments`` arrive as raw strings and bridged GPT conversations can
+    carry strings that are not valid JSON at all (e.g. ``":"``). Valid
+    JSON objects are parsed as-is; anything else degrades to an empty dict
+    with a warning instead of raising and failing the whole request.
+
+    Args:
+        raw: Tool input value of any type (dict, str, other)
+
+    Returns:
+        A dict suitable for the Kiro API
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return {}
+        try:
+            parsed = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(
+                f"Tool input string is not valid JSON, coercing to empty dict: {stripped[:80]!r}"
+            )
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        logger.warning(
+            f"Tool input JSON is not an object, coercing to empty dict: {stripped[:80]!r}"
+        )
+        return {}
+    if raw is not None:
+        logger.warning(
+            f"Tool input is not an object, coercing to empty dict: {type(raw).__name__}"
+        )
+    return {}
+
+
 def extract_tool_uses_from_message(
     content: Any,
     tool_calls: Optional[List[Dict[str, Any]]] = None
@@ -795,27 +943,25 @@ def extract_tool_uses_from_message(
             if isinstance(tc, dict):
                 func = tc.get("function", {})
                 arguments = func.get("arguments", "{}")
-                # Handle both string (OpenAI) and dict (Anthropic unified) formats
-                if isinstance(arguments, str):
-                    input_data = json.loads(arguments) if arguments else {}
-                else:
-                    input_data = arguments if arguments else {}
+                # Handle both string (OpenAI) and dict (Anthropic unified) formats;
+                # malformed strings degrade to {} instead of raising
+                input_data = coerce_tool_input_to_dict(arguments)
                 tool_uses.append({
                     "name": func.get("name", ""),
                     "input": input_data,
                     "toolUseId": tc.get("id", "")
                 })
-    
+
     # From content blocks (Anthropic format)
     if isinstance(content, list):
         for item in content:
             if isinstance(item, dict) and item.get("type") == "tool_use":
                 tool_uses.append({
                     "name": item.get("name", ""),
-                    "input": item.get("input", {}),
+                    "input": coerce_tool_input_to_dict(item.get("input", {})),
                     "toolUseId": item.get("id", "")
                 })
-    
+
     return tool_uses
 
 
@@ -1256,6 +1402,70 @@ def normalize_message_roles(messages: List[UnifiedMessage]) -> List[UnifiedMessa
     return normalized
 
 
+def repair_unpaired_tool_uses(messages: List[UnifiedMessage]) -> List[UnifiedMessage]:
+    """
+    Synthesizes toolResults for toolUses that never received one.
+
+    Kiro rejects a request with 400 REQUEST_BODY_INVALID when an assistant
+    toolUse has no matching toolResult. Proxies in front of the gateway
+    (notably cc-switch translating Codex /responses items) can drop tool
+    messages whose output is pure media, leaving orphaned function calls in
+    the history. Once such items enter a session every later request fails
+    identically, so the gateway guarantees the pairing invariant itself.
+
+    Only missing results are synthesized; existing results (including
+    duplicates) are left untouched.
+
+    Args:
+        messages: Unified messages after role normalization/alternation
+
+    Returns:
+        The same list (mutated in place) with synthetic tool_results appended
+        to the user message that follows the owning assistant message
+    """
+    repaired = 0
+    for idx, msg in enumerate(messages):
+        if msg.role != "assistant" or not msg.tool_calls:
+            continue
+
+        target_idx = idx + 1
+        if target_idx >= len(messages) or messages[target_idx].role != "user":
+            synthetic = UnifiedMessage(role="user", content="", tool_results=[])
+            messages.insert(target_idx, synthetic)
+
+        target = messages[target_idx]
+        adjacent_result_ids = {
+            result.get("tool_use_id")
+            for result in target.tool_results or []
+            if result.get("tool_use_id")
+        }
+        missing = [
+            tool_call.get("id")
+            for tool_call in msg.tool_calls
+            if tool_call.get("id") and tool_call.get("id") not in adjacent_result_ids
+        ]
+        if not missing:
+            continue
+
+        if target.tool_results is None:
+            target.tool_results = []
+        for tool_use_id in missing:
+            target.tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": (
+                    "[gateway: tool result was not delivered by the client; "
+                    "the tool likely produced an image or other media that was "
+                    "moved into an adjacent user message.]"
+                ),
+            })
+            repaired += 1
+
+    if repaired:
+        logger.info(f"Repaired {repaired} unpaired tool_use(s) with synthetic results")
+    return messages
+
+
 def ensure_alternating_roles(messages: List[UnifiedMessage]) -> List[UnifiedMessage]:
     """
     Ensures alternating user/assistant roles by inserting synthetic assistant messages.
@@ -1402,6 +1612,41 @@ def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Di
 # Main Payload Building
 # ==================================================================================================
 
+def build_tool_choice_directive(
+    tool_choice: Any,
+    tools: Optional[List[UnifiedTool]] = None,
+    protocol: Optional[str] = None,
+) -> str:
+    """Build a tool-choice directive, with strict validation when possible.
+
+    ``tools`` and ``protocol`` are optional for compatibility with callers that
+    only need the historical best-effort directive behavior.
+    """
+    if protocol:
+        return parse_tool_choice_policy(tool_choice, tools, protocol).build_directive()
+    if not tool_choice or tool_choice == "auto":
+        return ""
+    if tool_choice in ("required", "any"):
+        return ToolChoicePolicy(mode="required").build_directive()
+    if tool_choice == "none":
+        return ToolChoicePolicy(mode="none").build_directive()
+    if isinstance(tool_choice, dict):
+        choice_type = tool_choice.get("type")
+        if choice_type in ("required", "any"):
+            return ToolChoicePolicy(mode="required").build_directive()
+        if choice_type == "none":
+            return ToolChoicePolicy(mode="none").build_directive()
+        if choice_type == "tool":
+            name = tool_choice.get("name")
+        elif choice_type == "function" and isinstance(tool_choice.get("function"), dict):
+            name = tool_choice["function"].get("name")
+        else:
+            name = None
+        if name:
+            return ToolChoicePolicy(mode="named", tool_name=name).build_directive()
+    return ""
+
+
 def build_kiro_payload(
     messages: List[UnifiedMessage],
     system_prompt: str,
@@ -1409,7 +1654,7 @@ def build_kiro_payload(
     tools: Optional[List[UnifiedTool]],
     conversation_id: str,
     profile_arn: str,
-    thinking_config: ThinkingConfig
+    thinking_config: ThinkingConfig,
 ) -> KiroPayloadResult:
     """
     Builds complete payload for Kiro API from unified data.
@@ -1425,7 +1670,7 @@ def build_kiro_payload(
         conversation_id: Unique conversation ID
         profile_arn: AWS CodeWhisperer profile ARN
         thinking_config: Thinking configuration from API adapter
-    
+
     Returns:
         KiroPayloadResult with payload and tool documentation
     
@@ -1453,9 +1698,13 @@ def build_kiro_payload(
     if truncation_system_addition:
         full_system_prompt = full_system_prompt + truncation_system_addition if full_system_prompt else truncation_system_addition.strip()
     
-    # If no tools are defined, strip ALL tool-related content from messages
-    # Kiro API rejects requests with toolResults but no tools
-    if not tools:
+    declared_tool_names = {tool.name for tool in processed_tools or []}
+    has_undeclared_history_tool = any(
+        tool_call.get("function", {}).get("name") not in declared_tool_names
+        for message in messages
+        for tool_call in message.tool_calls or []
+    )
+    if not processed_tools or has_undeclared_history_tool:
         messages_without_tools, had_tool_content = strip_all_tool_content(messages)
         messages_with_assistants = messages_without_tools
         converted_tool_results = had_tool_content
@@ -1478,7 +1727,12 @@ def build_kiro_payload(
     # Ensure alternating user/assistant roles (fixes issue #64)
     # Insert synthetic assistant messages between consecutive user messages
     merged_messages = ensure_alternating_roles(merged_messages)
-    
+
+    # Guarantee every assistant toolUse has a matching toolResult. Client-side
+    # proxies can drop pure-media tool messages (see repair_unpaired_tool_uses),
+    # and Kiro rejects the whole request otherwise.
+    merged_messages = repair_unpaired_tool_uses(merged_messages)
+
     if not merged_messages:
         raise ValueError("No messages to send")
     

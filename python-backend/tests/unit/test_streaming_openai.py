@@ -21,9 +21,11 @@ from kiro.streaming_openai import (
     stream_kiro_to_openai_internal,
     stream_with_first_token_retry,
     collect_stream_response,
+    format_openai_response_from_result,
+    stream_openai_result,
     FirstTokenTimeoutError,
 )
-from kiro.streaming_core import KiroEvent
+from kiro.streaming_core import KiroEvent, StreamResult
 
 
 # ==================================================================================================
@@ -59,6 +61,65 @@ def mock_response():
     response.status_code = 200
     response.aclose = AsyncMock()
     return response
+
+
+# ==================================================================================================
+# Tests for validated result SSE encoding
+# ==================================================================================================
+
+class TestValidatedOpenaiResultEncoding:
+    """Tests for buffered SSE encoding after strict tool-choice validation."""
+
+    @pytest.mark.asyncio
+    async def test_encodes_validated_tool_call_as_protocol_sse(self, mock_model_cache):
+        """Encode a complete validated result without reading an upstream stream."""
+        result = StreamResult(
+            content="",
+            thinking_content="",
+            tool_calls=[{
+                "id": "call_weather",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": '{"city":"Paris"}',
+                },
+            }],
+            usage=None,
+            context_usage_percentage=5.0,
+        )
+
+        response = format_openai_response_from_result(
+            result,
+            "claude-sonnet-4",
+            mock_model_cache,
+        )
+        chunks = [chunk async for chunk in stream_openai_result(response)]
+
+        first_chunk = json.loads(chunks[0][len("data: "):])
+        tool_call = first_chunk["choices"][0]["delta"]["tool_calls"][0]
+        assert tool_call["index"] == 0
+        assert tool_call["function"]["name"] == "get_weather"
+        assert json.loads(tool_call["function"]["arguments"]) == {"city": "Paris"}
+
+        final_chunk = json.loads(chunks[1][len("data: "):])
+        assert final_chunk["choices"][0]["finish_reason"] == "tool_calls"
+        assert chunks[2] == "data: [DONE]\n\n"
+
+    def test_marks_incomplete_buffered_text_as_truncated(self, mock_model_cache):
+        response = format_openai_response_from_result(
+            StreamResult(content="cut off"),
+            "claude-sonnet-4",
+            mock_model_cache,
+        )
+        assert response["choices"][0]["finish_reason"] == "length"
+
+    def test_marks_completed_buffered_text_as_stopped(self, mock_model_cache):
+        response = format_openai_response_from_result(
+            StreamResult(content="complete", completed_normally=True),
+            "claude-sonnet-4",
+            mock_model_cache,
+        )
+        assert response["choices"][0]["finish_reason"] == "stop"
 
 
 # ==================================================================================================

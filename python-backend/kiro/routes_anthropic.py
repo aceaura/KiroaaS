@@ -26,7 +26,7 @@ Reference: https://docs.anthropic.com/en/api/messages
 """
 
 import json
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Security, Header
@@ -44,11 +44,18 @@ from kiro.models_anthropic import (
 )
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
-from kiro.converters_anthropic import anthropic_to_kiro
+from kiro.converters_anthropic import anthropic_to_kiro, resolve_anthropic_tool_choice
 from kiro.streaming_anthropic import (
     stream_kiro_to_anthropic,
     collect_anthropic_response,
     stream_with_first_token_retry_anthropic,
+    format_anthropic_response_from_result,
+    stream_anthropic_result,
+)
+from kiro.streaming_core import (
+    collect_with_tool_choice_retry,
+    ToolChoiceViolation,
+    ToolChoiceUpstreamError,
 )
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
@@ -279,13 +286,22 @@ async def messages(
             request_data.tools.append(web_search_tool)
             logger.debug("Auto-injected web_search tool for MCP emulation (Path B)")
     
+    try:
+        tool_choice_policy, _, allowed_tool_names = resolve_anthropic_tool_choice(request_data)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": str(exc)},
+            },
+        )
+
     # ==============================================================================
     # WebSearch Support - Path A: Native Anthropic (Early Return)
     # ==============================================================================
-    
-    # Check for native Anthropic server-side tool (Path A)
-    # This works ALWAYS, regardless of WEB_SEARCH_ENABLED setting
-    if request_data.tools:
+
+    if "web_search" in allowed_tool_names and request_data.tools:
         for tool in request_data.tools:
             tool_type = getattr(tool, "type", None)
             if tool_type and tool_type.startswith("web_search"):
@@ -308,7 +324,7 @@ async def messages(
                 
                 logger.info("Detected native Anthropic web_search (Path A), routing to MCP API")
                 return await handle_native_web_search(request, request_data, auth_manager, api_format="anthropic")
-    
+
     # ==============================================================================
     # Account System: Account System Failover or Legacy Mode
     # ==============================================================================
@@ -434,7 +450,86 @@ async def messages(
                 )
                 
                 if response.status_code == 200:
-                    # SUCCESS - report and return
+                    if tool_choice_policy.is_strict:
+                        async def make_strict_retry(
+                            retry_payload: Dict[str, Any],
+                        ) -> httpx.Response:
+                            return await http_client.request_with_retry(
+                                "POST", url, retry_payload, stream=True
+                            )
+
+                        try:
+                            strict_result = await collect_with_tool_choice_retry(
+                                make_request=make_strict_retry,
+                                initial_response=response,
+                                policy=tool_choice_policy,
+                                allowed_names=allowed_tool_names,
+                                payload=kiro_payload,
+                            )
+                        except ToolChoiceViolation as exc:
+                            await http_client.close()
+                            logger.warning(f"Strict tool_choice failed on account {account.id}: {exc}")
+                            return JSONResponse(
+                                status_code=502,
+                                content={
+                                    "type": "error",
+                                    "error": {
+                                        "type": "tool_choice_not_satisfied",
+                                        "message": str(exc),
+                                    },
+                                },
+                            )
+                        except ToolChoiceUpstreamError as exc:
+                            await http_client.close()
+                            error_type = classify_error(exc.status_code, None)
+                            await account_manager.report_failure(
+                                account.id,
+                                request_data.model,
+                                error_type,
+                                exc.status_code,
+                                None,
+                            )
+                            last_error_message = exc.body
+                            last_error_status = exc.status_code
+                            if error_type == ErrorType.FATAL:
+                                return JSONResponse(
+                                    status_code=exc.status_code,
+                                    content={
+                                        "type": "error",
+                                        "error": {
+                                            "type": "api_error",
+                                            "message": exc.body,
+                                        },
+                                    },
+                                )
+                            if len(all_accounts) == 1:
+                                break
+                            continue
+
+                        anthropic_response = format_anthropic_response_from_result(
+                            strict_result,
+                            request_data.model,
+                            model_cache,
+                            request_messages=messages_for_tokenizer,
+                            request_tools=tools_for_tokenizer,
+                            request_system=system_for_tokenizer,
+                        )
+                        await account_manager.report_success(account.id, request_data.model)
+                        await http_client.close()
+                        if debug_logger:
+                            debug_logger.discard_buffers()
+                        if request_data.stream:
+                            return StreamingResponse(
+                                stream_anthropic_result(anthropic_response),
+                                media_type="text/event-stream",
+                                headers={
+                                    "Cache-Control": "no-cache",
+                                    "Connection": "keep-alive",
+                                },
+                            )
+                        return JSONResponse(content=anthropic_response)
+
+                    # Auto policy keeps the existing streaming and failover path.
                     await account_manager.report_success(account.id, request_data.model)
                     
                     if request_data.stream:
@@ -793,6 +888,69 @@ async def messages(
                 }
             )
         
+        if tool_choice_policy.is_strict:
+            async def make_strict_retry(
+                retry_payload: Dict[str, Any],
+            ) -> httpx.Response:
+                return await http_client.request_with_retry(
+                    "POST", url, retry_payload, stream=True
+                )
+
+            try:
+                strict_result = await collect_with_tool_choice_retry(
+                    make_request=make_strict_retry,
+                    initial_response=response,
+                    policy=tool_choice_policy,
+                    allowed_names=allowed_tool_names,
+                    payload=kiro_payload,
+                )
+            except ToolChoiceViolation as exc:
+                await http_client.close()
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "type": "error",
+                        "error": {
+                            "type": "tool_choice_not_satisfied",
+                            "message": str(exc),
+                        },
+                    },
+                )
+            except ToolChoiceUpstreamError as exc:
+                await http_client.close()
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": exc.body,
+                        },
+                    },
+                )
+
+            anthropic_response = format_anthropic_response_from_result(
+                strict_result,
+                request_data.model,
+                model_cache,
+                request_messages=messages_for_tokenizer,
+                request_tools=tools_for_tokenizer,
+                request_system=system_for_tokenizer,
+            )
+            await http_client.close()
+            if debug_logger:
+                debug_logger.discard_buffers()
+            if request_data.stream:
+                return StreamingResponse(
+                    stream_anthropic_result(anthropic_response),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                    },
+                )
+            return JSONResponse(content=anthropic_response)
+
         if request_data.stream:
             # Streaming mode with first token retry
             async def stream_wrapper():
@@ -835,9 +993,9 @@ async def messages(
                         error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
                         logger.error(f"HTTP 500 - POST /v1/messages (streaming) - [{error_type}] {error_msg[:100]}")
                     elif client_disconnected:
-                        logger.info(f"HTTP 200 - POST /v1/messages (streaming) - client disconnected")
+                        logger.info("HTTP 200 - POST /v1/messages (streaming) - client disconnected")
                     else:
-                        logger.info(f"HTTP 200 - POST /v1/messages (streaming) - completed")
+                        logger.info("HTTP 200 - POST /v1/messages (streaming) - completed")
                     
                     if debug_logger:
                         if streaming_error:

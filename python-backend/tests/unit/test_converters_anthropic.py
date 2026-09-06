@@ -25,6 +25,7 @@ from kiro.converters_anthropic import (
     convert_anthropic_tools,
     anthropic_to_kiro,
     extract_thinking_config_from_anthropic,
+    resolve_anthropic_tool_choice,
 )
 from kiro.converters_core import UnifiedMessage, UnifiedTool
 from kiro.models_anthropic import (
@@ -1884,3 +1885,30 @@ class TestAnthropicToKiroIntegration:
         print(f"Checking for <max_thinking_length>6000</max_thinking_length>...")
         assert "<max_thinking_length>6000</max_thinking_length>" in content
         assert "<thinking_mode>enabled</thinking_mode>" in content
+
+
+class TestStrictAnthropicToolChoiceIntegration:
+    """Tests for strict Anthropic tool-choice payload integration."""
+
+    def test_named_choice_filters_payload_tools(self):
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="Run the command")],
+            max_tokens=1024,
+            tools=[
+                AnthropicTool(name="Read", input_schema={}),
+                AnthropicTool(name="Bash", input_schema={}),
+            ],
+            tool_choice={"type": "tool", "name": "Bash"},
+        )
+
+        policy, selected, allowed = resolve_anthropic_tool_choice(request)
+        payload = anthropic_to_kiro(request, "strict-anthropic", "")
+        user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
+        specifications = user_input["userInputMessageContext"]["tools"]
+
+        assert policy.mode == "named"
+        assert [tool.name for tool in selected] == ["Bash"]
+        assert allowed == {"Bash"}
+        assert [item["toolSpecification"]["name"] for item in specifications] == ["Bash"]
+        assert "MUST call the tool named 'Bash'" in user_input["content"]

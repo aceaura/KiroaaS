@@ -44,6 +44,7 @@ from kiro.streaming_core import (
     collect_stream_to_result,
     FirstTokenTimeoutError,
     KiroEvent,
+    StreamResult,
     calculate_tokens_from_context_usage,
     stream_with_first_token_retry,
 )
@@ -718,6 +719,166 @@ async def stream_kiro_to_anthropic(
             logger.debug(f"Error closing response: {close_error}")
 
 
+def format_anthropic_response_from_result(
+    result: StreamResult,
+    model: str,
+    model_cache: "ModelInfoCache",
+    request_messages: Optional[list] = None,
+    request_tools: Optional[list] = None,
+    request_system: Optional[Any] = None,
+) -> dict:
+    """Format a fully validated result as an Anthropic Messages response."""
+    input_tokens = 0
+    if request_messages or request_tools or request_system:
+        request_token_stats = estimate_request_tokens(
+            messages=request_messages or [],
+            tools=request_tools,
+            system_prompt=request_system,
+            apply_claude_correction=False,
+        )
+        input_tokens = request_token_stats["total_tokens"]
+
+    content_blocks: List[Dict[str, Any]] = []
+    if result.thinking_content and FAKE_REASONING_HANDLING == "as_reasoning_content":
+        content_blocks.append({
+            "type": "thinking",
+            "thinking": result.thinking_content,
+            "signature": generate_thinking_signature(),
+        })
+    text_content = result.content
+    if result.thinking_content and FAKE_REASONING_HANDLING == "include_as_text":
+        text_content = result.thinking_content + text_content
+    if text_content:
+        content_blocks.append({"type": "text", "text": text_content})
+
+    for tool_call in result.tool_calls:
+        function = tool_call.get("function") or {}
+        raw_input = function.get("arguments", tool_call.get("input", {}))
+        if isinstance(raw_input, str):
+            try:
+                tool_input = json.loads(raw_input)
+            except json.JSONDecodeError:
+                tool_input = {}
+        else:
+            tool_input = raw_input
+        content_blocks.append({
+            "type": "tool_use",
+            "id": tool_call.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
+            "name": function.get("name", "") or tool_call.get("name", ""),
+            "input": tool_input,
+        })
+
+    output_tokens = count_tokens(result.content + result.thinking_content)
+    if result.context_usage_percentage is not None:
+        prompt_tokens, _, prompt_source, _ = calculate_tokens_from_context_usage(
+            result.context_usage_percentage,
+            output_tokens,
+            model_cache,
+            model,
+        )
+        if prompt_source != "unknown":
+            input_tokens = prompt_tokens
+
+    completed_normally = (
+        result.completed_normally
+        or result.usage is not None
+        or result.context_usage_percentage is not None
+    )
+    content_was_truncated = (
+        not completed_normally
+        and bool(result.content)
+        and not result.tool_calls
+    )
+    if content_was_truncated:
+        stop_reason = "max_tokens"
+    elif result.tool_calls:
+        stop_reason = "tool_use"
+    else:
+        stop_reason = "end_turn"
+
+    usage: Dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    usage.update(_extract_cache_usage_fields(result.usage))
+    return {
+        "id": generate_message_id(),
+        "type": "message",
+        "role": "assistant",
+        "content": content_blocks,
+        "model": model,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": usage,
+    }
+
+
+async def stream_anthropic_result(response: dict) -> AsyncGenerator[str, None]:
+    """Encode a validated Anthropic response as buffered protocol SSE."""
+    start_message = {**response, "content": [], "stop_reason": None, "usage": {
+        **response["usage"],
+        "output_tokens": 0,
+    }}
+    yield format_sse_event("message_start", {
+        "type": "message_start",
+        "message": start_message,
+    })
+    for index, block in enumerate(response["content"]):
+        if block["type"] == "text":
+            empty_block = {"type": "text", "text": ""}
+            delta = {"type": "text_delta", "text": block["text"]}
+        elif block["type"] == "thinking":
+            empty_block = {
+                "type": "thinking",
+                "thinking": "",
+                "signature": "",
+            }
+            delta = {"type": "thinking_delta", "thinking": block["thinking"]}
+        else:
+            empty_block = {
+                "type": "tool_use",
+                "id": block["id"],
+                "name": block["name"],
+                "input": {},
+            }
+            delta = {
+                "type": "input_json_delta",
+                "partial_json": json.dumps(block["input"], ensure_ascii=False),
+            }
+        yield format_sse_event("content_block_start", {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": empty_block,
+        })
+        yield format_sse_event("content_block_delta", {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": delta,
+        })
+        if block["type"] == "thinking":
+            yield format_sse_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {
+                    "type": "signature_delta",
+                    "signature": block["signature"],
+                },
+            })
+        yield format_sse_event("content_block_stop", {
+            "type": "content_block_stop",
+            "index": index,
+        })
+    yield format_sse_event("message_delta", {
+        "type": "message_delta",
+        "delta": {
+            "stop_reason": response["stop_reason"],
+            "stop_sequence": response["stop_sequence"],
+        },
+        "usage": {"output_tokens": response["usage"]["output_tokens"]},
+    })
+    yield format_sse_event("message_stop", {"type": "message_stop"})
+
+
 async def collect_anthropic_response(
     response: httpx.Response,
     model: str,
@@ -727,140 +888,16 @@ async def collect_anthropic_response(
     request_tools: Optional[list] = None,
     request_system: Optional[Any] = None
 ) -> dict:
-    """
-    Collect full response from Kiro stream in Anthropic format.
-    
-    Used for non-streaming mode.
-    
-    Args:
-        response: HTTP response with stream
-        model: Model name
-        model_cache: Model cache
-        auth_manager: Authentication manager
-        request_messages: Original request messages (for token counting)
-        request_tools: Original request tools (for token counting)
-        request_system: Original system prompt (for token counting)
-    
-    Returns:
-        Dictionary with full response in Anthropic Messages format
-    """
-    message_id = generate_message_id()
-    
-    # Non-streaming uses the same full-request estimation as streaming
-    input_tokens = 0
-    if request_messages or request_tools or request_system:
-        request_token_stats = estimate_request_tokens(
-            messages=request_messages or [],
-            tools=request_tools,
-            system_prompt=request_system,
-            apply_claude_correction=False
-        )
-        input_tokens = request_token_stats["total_tokens"]
-    
-    # Collect stream result
+    """Collect a Kiro stream and format it as an Anthropic response."""
     result = await collect_stream_to_result(response)
-    upstream_cache_usage = _extract_cache_usage_fields(result.usage)
-    
-    # Build content blocks
-    content_blocks = []
-    
-    # Add thinking block FIRST if there's thinking content and mode is as_reasoning_content
-    if result.thinking_content and FAKE_REASONING_HANDLING == "as_reasoning_content":
-        content_blocks.append({
-            "type": "thinking",
-            "thinking": result.thinking_content,
-            "signature": generate_thinking_signature()
-        })
-    
-    # Add text block if there's content
-    # For include_as_text mode, prepend thinking content to regular content
-    text_content = result.content
-    if result.thinking_content and FAKE_REASONING_HANDLING == "include_as_text":
-        text_content = result.thinking_content + text_content
-    
-    if text_content:
-        content_blocks.append({
-            "type": "text",
-            "text": text_content
-        })
-    
-    # Add tool use blocks
-    for tc in result.tool_calls:
-        tool_id = tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}"
-        tool_name = tc.get("function", {}).get("name", "") or tc.get("name", "")
-        tool_input = tc.get("function", {}).get("arguments", {}) or tc.get("input", {})
-        
-        if isinstance(tool_input, str):
-            try:
-                tool_input = json.loads(tool_input)
-            except json.JSONDecodeError:
-                tool_input = {}
-        
-        content_blocks.append({
-            "type": "tool_use",
-            "id": tool_id,
-            "name": tool_name,
-            "input": tool_input
-        })
-    
-    # Calculate output tokens
-    output_tokens = count_tokens(result.content + result.thinking_content)
-    
-    # Calculate from context usage if available
-    if result.context_usage_percentage is not None:
-        prompt_tokens, _, prompt_source, _ = calculate_tokens_from_context_usage(
-            result.context_usage_percentage, output_tokens, model_cache, model
-        )
-        # Don't override fallback when context_usage=0% (returns source="unknown")
-        if prompt_source != "unknown":
-            input_tokens = prompt_tokens
-    
-    # Detect content truncation (missing completion signals)
-    stream_completed_normally = result.context_usage_percentage is not None
-    content_was_truncated = (
-        not stream_completed_normally and
-        len(result.content) > 0 and
-        not result.tool_calls  # Don't confuse with tool call truncation
+    return format_anthropic_response_from_result(
+        result,
+        model,
+        model_cache,
+        request_messages=request_messages,
+        request_tools=request_tools,
+        request_system=request_system,
     )
-    
-    if content_was_truncated:
-        from kiro.config import TRUNCATION_RECOVERY
-        logger.error(
-            f"Content truncated by Kiro API (non-streaming): stream ended without completion signals, "
-            f"length={len(result.content)} chars. "
-            f"{'Model will be notified automatically about truncation.' if TRUNCATION_RECOVERY else 'Set TRUNCATION_RECOVERY=true in .env to auto-notify model about truncation.'}"
-        )
-    
-    # Determine stop reason (truncation has highest priority)
-    if content_was_truncated:
-        stop_reason = "max_tokens"
-    elif result.tool_calls:
-        stop_reason = "tool_use"
-    else:
-        stop_reason = "end_turn"
-    
-    logger.debug(
-        f"[Anthropic Non-Streaming] Completed: "
-        f"input_tokens={input_tokens}, output_tokens={output_tokens}, "
-        f"tool_calls={len(result.tool_calls)}, stop_reason={stop_reason}"
-    )
-    
-    usage_payload: Dict[str, Any] = {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens
-    }
-    usage_payload.update(upstream_cache_usage)
-
-    return {
-        "id": message_id,
-        "type": "message",
-        "role": "assistant",
-        "content": content_blocks,
-        "model": model,
-        "stop_reason": stop_reason,
-        "stop_sequence": None,
-        "usage": usage_payload
-    }
 
 
 async def stream_with_first_token_retry_anthropic(

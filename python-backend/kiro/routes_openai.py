@@ -28,7 +28,9 @@ Contains all API endpoints:
 
 import json
 from datetime import datetime, timezone
+from typing import Any, Dict
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
@@ -47,8 +49,19 @@ from kiro.models_openai import (
 from kiro.auth import KiroAuthManager, AuthType
 from kiro.cache import ModelInfoCache
 from kiro.model_resolver import ModelResolver
-from kiro.converters_openai import build_kiro_payload
-from kiro.streaming_openai import stream_kiro_to_openai, collect_stream_response, stream_with_first_token_retry
+from kiro.converters_openai import build_kiro_payload, resolve_openai_tool_choice
+from kiro.streaming_openai import (
+    stream_kiro_to_openai,
+    collect_stream_response,
+    stream_with_first_token_retry,
+    format_openai_response_from_result,
+    stream_openai_result,
+)
+from kiro.streaming_core import (
+    collect_with_tool_choice_retry,
+    ToolChoiceViolation,
+    ToolChoiceUpstreamError,
+)
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
@@ -270,6 +283,11 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             )
             request_data.tools.append(web_search_tool)
             logger.debug("Auto-injected web_search tool for MCP emulation (Path B)")
+
+    try:
+        tool_choice_policy, _, allowed_tool_names = resolve_openai_tool_choice(request_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     
     # ==============================================================================
     # Account System: Account System Failover or Legacy Mode
@@ -363,12 +381,86 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 )
                 
                 if response.status_code == 200:
-                    # SUCCESS - report and return
-                    await account_manager.report_success(account.id, request_data.model)
-                    
                     # Prepare data for token counting
                     messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
                     tools_for_tokenizer = [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
+
+                    if tool_choice_policy.is_strict:
+                        async def make_strict_retry(
+                            retry_payload: Dict[str, Any],
+                        ) -> httpx.Response:
+                            return await http_client.request_with_retry(
+                                "POST", url, retry_payload, stream=True
+                            )
+
+                        try:
+                            strict_result = await collect_with_tool_choice_retry(
+                                make_request=make_strict_retry,
+                                initial_response=response,
+                                policy=tool_choice_policy,
+                                allowed_names=allowed_tool_names,
+                                payload=kiro_payload,
+                            )
+                        except ToolChoiceViolation as exc:
+                            await http_client.close()
+                            logger.warning(f"Strict tool_choice failed on account {account.id}: {exc}")
+                            return JSONResponse(
+                                status_code=502,
+                                content={
+                                    "error": {
+                                        "message": str(exc),
+                                        "type": "tool_choice_not_satisfied",
+                                        "code": "tool_choice_not_satisfied",
+                                    }
+                                },
+                            )
+                        except ToolChoiceUpstreamError as exc:
+                            await http_client.close()
+                            error_type = classify_error(exc.status_code, None)
+                            await account_manager.report_failure(
+                                account.id,
+                                request_data.model,
+                                error_type,
+                                exc.status_code,
+                                None,
+                            )
+                            last_error_message = exc.body
+                            last_error_status = exc.status_code
+                            if error_type == ErrorType.FATAL:
+                                return JSONResponse(
+                                    status_code=exc.status_code,
+                                    content={
+                                        "error": {
+                                            "message": exc.body,
+                                            "type": "kiro_api_error",
+                                            "code": exc.status_code,
+                                        }
+                                    },
+                                )
+                            if len(all_accounts) == 1:
+                                break
+                            continue
+
+                        openai_response = format_openai_response_from_result(
+                            strict_result,
+                            request_data.model,
+                            model_cache,
+                            request_messages=messages_for_tokenizer,
+                            request_tools=tools_for_tokenizer,
+                        )
+                        await account_manager.report_success(account.id, request_data.model)
+                        await http_client.close()
+                        if debug_logger:
+                            debug_logger.discard_buffers()
+                        if request_data.stream:
+                            return StreamingResponse(
+                                stream_openai_result(openai_response),
+                                media_type="text/event-stream",
+                            )
+                        return JSONResponse(content=openai_response)
+
+                    # Auto policy keeps the existing streaming and failover path.
+                    await account_manager.report_success(account.id, request_data.model)
                     
                     if request_data.stream:
                         # Streaming mode
@@ -663,6 +755,64 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         # Convert Pydantic models to dicts for tokenizer
         messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
         tools_for_tokenizer = [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
+
+        if tool_choice_policy.is_strict:
+            async def make_strict_retry(
+                retry_payload: Dict[str, Any],
+            ) -> httpx.Response:
+                return await http_client.request_with_retry(
+                    "POST", url, retry_payload, stream=True
+                )
+
+            try:
+                strict_result = await collect_with_tool_choice_retry(
+                    make_request=make_strict_retry,
+                    initial_response=response,
+                    policy=tool_choice_policy,
+                    allowed_names=allowed_tool_names,
+                    payload=kiro_payload,
+                )
+            except ToolChoiceViolation as exc:
+                await http_client.close()
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "error": {
+                            "message": str(exc),
+                            "type": "tool_choice_not_satisfied",
+                            "code": "tool_choice_not_satisfied",
+                        }
+                    },
+                )
+            except ToolChoiceUpstreamError as exc:
+                await http_client.close()
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={
+                        "error": {
+                            "message": exc.body,
+                            "type": "kiro_api_error",
+                            "code": exc.status_code,
+                        }
+                    },
+                )
+
+            openai_response = format_openai_response_from_result(
+                strict_result,
+                request_data.model,
+                model_cache,
+                request_messages=messages_for_tokenizer,
+                request_tools=tools_for_tokenizer,
+            )
+            await http_client.close()
+            if debug_logger:
+                debug_logger.discard_buffers()
+            if request_data.stream:
+                return StreamingResponse(
+                    stream_openai_result(openai_response),
+                    media_type="text/event-stream",
+                )
+            return JSONResponse(content=openai_response)
         
         if request_data.stream:
             # Streaming mode with first token retry

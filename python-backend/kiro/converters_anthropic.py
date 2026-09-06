@@ -24,7 +24,7 @@ This module is an adapter layer that converts Anthropic-specific formats
 to the unified format used by converters_core.py.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -39,7 +39,10 @@ from kiro.converters_core import (
     UnifiedMessage,
     UnifiedTool,
     ThinkingConfig,
+    ToolChoicePolicy,
     build_kiro_payload,
+    parse_tool_choice_policy,
+    coerce_tool_input_to_dict,
     extract_text_content,
     extract_images_from_content,
 )
@@ -245,9 +248,9 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
                     "type": "function",
                     "function": {
                         "name": tool_name,
-                        "arguments": tool_input
-                        if isinstance(tool_input, str)
-                        else tool_input,
+                        # Raw-dict paths bypass Pydantic coercion, so normalize
+                        # string inputs here as well.
+                        "arguments": coerce_tool_input_to_dict(tool_input),
                     },
                 }
             )
@@ -370,6 +373,17 @@ def convert_anthropic_tools(
     return unified_tools if unified_tools else None
 
 
+def resolve_anthropic_tool_choice(
+    request: AnthropicMessagesRequest,
+) -> Tuple[ToolChoicePolicy, Optional[List[UnifiedTool]], Set[str]]:
+    """Resolve policy, upstream tools, and client-visible allowed names."""
+    unified_tools = convert_anthropic_tools(request.tools)
+    policy = parse_tool_choice_policy(request.tool_choice, unified_tools, "anthropic")
+    selected_tools = policy.filter_tools(unified_tools)
+    allowed_names = {tool.name for tool in selected_tools or []}
+    return policy, selected_tools, allowed_names
+
+
 def extract_thinking_config_from_anthropic(request: AnthropicMessagesRequest) -> ThinkingConfig:
     """
     Extract thinking configuration from Anthropic request.
@@ -453,12 +467,16 @@ def anthropic_to_kiro(
     # Convert messages to unified format
     unified_messages = convert_anthropic_messages(request.messages)
 
-    # Convert tools to unified format
-    unified_tools = convert_anthropic_tools(request.tools)
+    # Resolve against original client-visible names before extension aliasing.
+    tool_choice_policy, unified_tools, _ = resolve_anthropic_tool_choice(request)
 
     # System prompt is already separate in Anthropic format!
     # It can be a string or list of content blocks (for prompt caching)
     system_prompt = extract_system_prompt(request.system)
+
+    tool_choice_directive = tool_choice_policy.build_directive()
+    if tool_choice_directive:
+        system_prompt = system_prompt + tool_choice_directive if system_prompt else tool_choice_directive.strip()
 
     # Get model ID for Kiro API (normalizes + resolves hidden models)
     # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid

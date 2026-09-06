@@ -16,14 +16,124 @@ For Anthropic API tests, see test_routes_anthropic.py.
 import pytest
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from datetime import datetime, timezone
+from types import SimpleNamespace
 import json
 import time
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
-from kiro.routes_openai import verify_api_key, router
+from kiro.routes_openai import chat_completions, verify_api_key, router
 from kiro.config import PROXY_API_KEY, APP_VERSION
+from kiro.models_openai import ChatCompletionRequest
+from kiro.streaming_core import ToolChoiceUpstreamError, ToolChoiceViolation
+
+
+# =============================================================================
+# Tests for strict streaming buffering
+# =============================================================================
+
+class TestStrictStreamingBuffering:
+    """Tests that strict semantic validation completes before SSE starts."""
+
+    @pytest.mark.asyncio
+    async def test_validation_failure_returns_502_without_sse_output(self):
+        """Return a buffered protocol error without invoking the SSE encoder."""
+        auth_manager = MagicMock(
+            api_host="https://api.example.com",
+            profile_arn="arn:test",
+        )
+        account = MagicMock(
+            auth_manager=auth_manager,
+            model_cache=MagicMock(),
+            model_resolver=MagicMock(),
+        )
+        account_manager = MagicMock()
+        account_manager.get_first_account.return_value = account
+        app = SimpleNamespace(state=SimpleNamespace(
+            account_system=False,
+            account_manager=account_manager,
+            http_client=MagicMock(),
+        ))
+        request = Request({"type": "http", "app": app})
+        request_data = ChatCompletionRequest.model_validate({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": "Use the tool"}],
+            "stream": True,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object"},
+                },
+            }],
+            "tool_choice": "required",
+        })
+        upstream_response = MagicMock(status_code=200)
+        http_client = MagicMock()
+        http_client.request_with_retry = AsyncMock(return_value=upstream_response)
+        http_client.close = AsyncMock()
+
+        with patch("kiro.routes_openai.KiroHttpClient", return_value=http_client), \
+             patch(
+                 "kiro.routes_openai.collect_with_tool_choice_retry",
+                 AsyncMock(side_effect=ToolChoiceViolation("required tool call missing")),
+             ), \
+             patch("kiro.routes_openai.stream_openai_result") as stream_encoder:
+            response = await chat_completions(request, request_data)
+
+        assert response.status_code == 502
+        assert json.loads(response.body)["error"]["code"] == "tool_choice_not_satisfied"
+        stream_encoder.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retry_upstream_error_preserves_status(self):
+        auth_manager = MagicMock(
+            api_host="https://api.example.com",
+            profile_arn="arn:test",
+        )
+        account = MagicMock(
+            auth_manager=auth_manager,
+            model_cache=MagicMock(),
+            model_resolver=MagicMock(),
+        )
+        account_manager = MagicMock()
+        account_manager.get_first_account.return_value = account
+        app = SimpleNamespace(state=SimpleNamespace(
+            account_system=False,
+            account_manager=account_manager,
+            http_client=MagicMock(),
+        ))
+        request = Request({"type": "http", "app": app})
+        request_data = ChatCompletionRequest.model_validate({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": "Use the tool"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object"},
+                },
+            }],
+            "tool_choice": "required",
+        })
+        upstream_response = MagicMock(status_code=200)
+        http_client = MagicMock()
+        http_client.request_with_retry = AsyncMock(return_value=upstream_response)
+        http_client.close = AsyncMock()
+
+        with patch("kiro.routes_openai.KiroHttpClient", return_value=http_client), \
+             patch(
+                 "kiro.routes_openai.collect_with_tool_choice_retry",
+                 AsyncMock(side_effect=ToolChoiceUpstreamError(429, "rate limited")),
+             ):
+            response = await chat_completions(request, request_data)
+
+        body = json.loads(response.body)
+        assert response.status_code == 429
+        assert body["error"]["type"] == "kiro_api_error"
+        assert body["error"]["code"] == 429
 
 
 # =============================================================================
@@ -1240,7 +1350,7 @@ class TestTruncationRecoveryEdgeCases:
         print("Setup: Enabling recovery and saving truncation...")
         from kiro.truncation_state import save_tool_truncation, get_cache_stats
         from kiro.models_openai import ChatMessage
-        import os
+        from kiro import config
         
         tool_call_id = "tooluse_disabled_recovery"
         save_tool_truncation(tool_call_id, "tool", {"size_bytes": 1000, "reason": "test"})
@@ -1250,11 +1360,7 @@ class TestTruncationRecoveryEdgeCases:
         assert stats["tool_truncations"] >= 1
         
         print("Action: Disabling recovery...")
-        with patch.dict(os.environ, {"TRUNCATION_RECOVERY": "false"}):
-            from importlib import reload
-            from kiro import config
-            reload(config)
-            
+        with patch.object(config, "TRUNCATION_RECOVERY", False):
             print("Action: Processing tool_result with recovery disabled...")
             from kiro.truncation_recovery import should_inject_recovery
             from kiro.truncation_state import get_tool_truncation
@@ -1275,7 +1381,7 @@ class TestTruncationRecoveryEdgeCases:
             print("Checking: No modification occurred...")
             assert modified_messages[0].content == "Result"
             assert "[API Limitation]" not in modified_messages[0].content
-        
+
         print("Checking: Cache entry still exists (not cleaned up)...")
         # Note: get_tool_truncation() was NOT called, so entry should still be there
         # But we can't verify this without calling get_tool_truncation again

@@ -11,6 +11,7 @@ Tests for shared conversion logic used by both OpenAI and Anthropic adapters:
 - Thinking tag injection
 """
 
+import json
 import os
 import pytest
 from unittest.mock import patch
@@ -24,13 +25,16 @@ from kiro.converters_core import (
     normalize_message_roles,
     ensure_alternating_roles,
     ensure_assistant_before_tool_results,
+    repair_unpaired_tool_uses,
     strip_all_tool_content,
     build_kiro_history,
     build_kiro_payload,
+    build_tool_choice_directive,
     process_tools_with_long_descriptions,
     inject_thinking_tags,
     extract_tool_results_from_content,
     extract_tool_uses_from_message,
+    coerce_tool_input_to_dict,
     sanitize_json_schema,
     convert_tools_to_kiro_format,
     convert_tool_results_to_kiro_format,
@@ -39,6 +43,8 @@ from kiro.converters_core import (
     UnifiedMessage,
     UnifiedTool,
     ThinkingConfig,
+    ToolChoicePolicy,
+    parse_tool_choice_policy,
 )
 
 # Test data for images - 1x1 pixel JPEG
@@ -1981,6 +1987,181 @@ class TestNormalizeAndAlternatingIntegration:
 
 
 # ==================================================================================================
+# Tests for repair_unpaired_tool_uses
+# ==================================================================================================
+
+class TestRepairUnpairedToolUses:
+    """
+    Tests for repair_unpaired_tool_uses function.
+
+    Kiro rejects requests where an assistant toolUse has no matching
+    toolResult (400 REQUEST_BODY_INVALID). Proxies like cc-switch can drop
+    pure-media tool messages, leaving orphaned function calls.
+    """
+
+    @staticmethod
+    def _call(cid, name="view_image"):
+        return {"id": cid, "type": "function", "function": {"name": name, "arguments": "{}"}}
+
+    @staticmethod
+    def _result(cid):
+        return {"type": "tool_result", "tool_use_id": cid, "content": "ok"}
+
+    def test_fully_paired_conversation_is_unchanged(self):
+        """
+        What it does: Verifies a fully paired conversation passes through untouched.
+        Purpose: The repair must be a no-op for healthy clients.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1")]),
+            UnifiedMessage(role="user", content="", tool_results=[self._result("c1")]),
+        ]
+        original = [UnifiedMessage(role=m.role, content=m.content, tool_calls=m.tool_calls, tool_results=list(m.tool_results) if m.tool_results else None) for m in messages]
+
+        result = repair_unpaired_tool_uses(messages)
+
+        assert [m.role for m in result] == [m.role for m in original]
+        for got, want in zip(result, original):
+            assert got.tool_calls == want.tool_calls
+            assert got.tool_results == want.tool_results
+
+    def test_no_tool_messages_is_unchanged(self):
+        messages = [
+            UnifiedMessage(role="user", content="hi"),
+            UnifiedMessage(role="assistant", content="hello"),
+        ]
+        result = repair_unpaired_tool_uses(messages)
+        assert len(result) == 2
+        assert result[0].tool_results is None
+        assert result[1].tool_calls is None
+
+    def test_synthesizes_missing_result(self):
+        """
+        What it does: Synthesizes a toolResult for an orphaned toolUse.
+        Purpose: Missing results cause Kiro 400 REQUEST_BODY_INVALID.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1"), self._call("c2")]),
+            UnifiedMessage(role="user", content="", tool_results=[self._result("c2")]),
+        ]
+        result = repair_unpaired_tool_uses(messages)
+
+        user_with_results = result[2]
+        ids = [tr["tool_use_id"] for tr in user_with_results.tool_results]
+        assert "c1" in ids and "c2" in ids
+        synth = next(tr for tr in user_with_results.tool_results if tr["tool_use_id"] == "c1")
+        assert "gateway" in synth["content"]
+
+    def test_partial_missing_matches_codex_scenario(self):
+        """
+        What it does: Two of three calls missing results (the cc-switch/Codex
+        pure-media drop shape: assistant c1,c2,c3; user carries images; only
+        c3's tool message survived).
+        Purpose: Mirror the production incident exactly.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1"), self._call("c2"), self._call("c3")]),
+            UnifiedMessage(role="user", content="", tool_results=[self._result("c3")]),
+        ]
+        result = repair_unpaired_tool_uses(messages)
+
+        ids = [tr["tool_use_id"] for tr in result[2].tool_results]
+        assert sorted(ids) == ["c1", "c2", "c3"]
+
+    def test_appends_new_user_message_when_none_follows(self):
+        """
+        What it does: Assistant toolUse as the last message gets a synthetic
+        user message with the missing result.
+        Purpose: Cover the boundary where no following user message exists.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1")]),
+        ]
+        result = repair_unpaired_tool_uses(messages)
+
+        assert len(result) == 3
+        assert result[2].role == "user"
+        assert [tr["tool_use_id"] for tr in result[2].tool_results] == ["c1"]
+
+    def test_inserts_result_before_intervening_assistant_turn(self):
+        messages = [
+            UnifiedMessage(role="user", content="first"),
+            UnifiedMessage(role="assistant", content="", tool_calls=[self._call("c1")]),
+            UnifiedMessage(role="assistant", content="unrelated later response"),
+            UnifiedMessage(role="user", content="later user turn"),
+        ]
+
+        result = repair_unpaired_tool_uses(messages)
+
+        assert [message.role for message in result[:4]] == [
+            "user", "assistant", "user", "assistant"
+        ]
+        assert result[2].tool_results[0]["tool_use_id"] == "c1"
+        assert result[4].content == "later user turn"
+
+    def test_later_reused_id_does_not_pair_earlier_call(self):
+        messages = [
+            UnifiedMessage(role="user", content="first"),
+            UnifiedMessage(role="assistant", content="", tool_calls=[self._call("same")]),
+            UnifiedMessage(role="assistant", content="later assistant"),
+            UnifiedMessage(
+                role="user",
+                content="later result",
+                tool_results=[self._result("same")],
+            ),
+        ]
+
+        result = repair_unpaired_tool_uses(messages)
+
+        assert result[2].role == "user"
+        assert result[2].tool_results[0]["tool_use_id"] == "same"
+        assert result[4].tool_results[0]["tool_use_id"] == "same"
+
+    def test_build_kiro_payload_includes_repair(self):
+        """
+        What it does: build_kiro_payload runs the repair; the synthetic result
+        reaches the Kiro history/current toolResults.
+        Purpose: Integration guarantee for both protocol paths.
+        """
+        messages = [
+            UnifiedMessage(role="user", content="compare"),
+            UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1"), self._call("c2")]),
+            UnifiedMessage(role="user", content="", tool_results=[self._result("c2")]),
+        ]
+        result = build_kiro_payload(
+            messages=messages,
+            system_prompt="",
+            model_id="gpt-5.6-terra",
+            tools=[UnifiedTool(name="view_image", description="view", input_schema={"type": "object", "properties": {}})],
+            conversation_id="conv-repair",
+            profile_arn="arn:aws:test",
+            thinking_config=ThinkingConfig(enabled=False),
+        )
+
+        def _collect_ids(payload):
+            ids = []
+            entries = payload["conversationState"].get("history", [])
+            entries += [payload["conversationState"]["currentMessage"]]
+            for entry in entries:
+                user_msg = entry.get("userInputMessage", {})
+                for tr in (user_msg.get("userInputMessageContext", {}) or {}).get("toolResults", []):
+                    ids.append(tr["toolUseId"])
+                asst = entry.get("assistantResponseMessage", {})
+                for tu in asst.get("toolUses", []) or []:
+                    ids.append("call:" + tu["toolUseId"])
+            return ids
+
+        ids = _collect_ids(result.payload)
+        # Both toolUses must have results in the final payload (the merged
+        # user message with tool_results is the current message here).
+        assert "c1" in ids and "c2" in ids
+
+
+# ==================================================================================================
 # Tests for ensure_assistant_before_tool_results
 # ==================================================================================================
 
@@ -3170,9 +3351,107 @@ class TestExtractToolUses:
         
         print("Action: Extracting tool uses...")
         result = extract_tool_uses_from_message(content=content, tool_calls=tool_calls)
-        
+
         print(f"Result: {result}")
         assert len(result) == 2
+
+    def test_malformed_string_arguments_degrade_to_empty_dict(self):
+        """
+        What it does: Verifies unparseable OpenAI arguments string degrades to {}.
+        Purpose: Real GPT traffic surfaced arguments=":" which used to raise
+            json.JSONDecodeError and fail the whole request.
+        """
+        print("Setup: tool_calls with arguments=':'...")
+        tool_calls = [{
+            "id": "call_1",
+            "function": {"name": "Bash", "arguments": ":"}
+        }]
+
+        print("Action: Extracting tool uses...")
+        result = extract_tool_uses_from_message(content="", tool_calls=tool_calls)
+
+        print(f"Result: {result}")
+        assert len(result) == 1
+        assert result[0]["input"] == {}
+        assert result[0]["name"] == "Bash"
+
+    def test_string_arguments_parsed_when_valid_json(self):
+        """
+        What it does: Verifies valid JSON string arguments are parsed to dict.
+        Purpose: Ensure the normal OpenAI string-arguments path still works.
+        """
+        print("Setup: tool_calls with valid JSON string arguments...")
+        tool_calls = [{
+            "id": "call_1",
+            "function": {"name": "Bash", "arguments": '{"command": "ls -la"}'}
+        }]
+
+        print("Action: Extracting tool uses...")
+        result = extract_tool_uses_from_message(content="", tool_calls=tool_calls)
+
+        print(f"Result: {result}")
+        assert result[0]["input"] == {"command": "ls -la"}
+
+    def test_content_block_string_input_coerced(self):
+        """
+        What it does: Verifies a tool_use content block with string input is coerced.
+        Purpose: Dict-based paths bypass Pydantic coercion; the extractor
+            must normalize on its own.
+        """
+        print("Setup: content tool_use block with input=':'...")
+        content = [{
+            "type": "tool_use",
+            "id": "call_9",
+            "name": "Bash",
+            "input": ":"
+        }]
+
+        print("Action: Extracting tool uses...")
+        result = extract_tool_uses_from_message(content=content, tool_calls=None)
+
+        print(f"Result: {result}")
+        assert result[0]["input"] == {}
+
+
+# ==================================================================================================
+# Tests for coerce_tool_input_to_dict
+# ==================================================================================================
+
+class TestCoerceToolInputToDict:
+    """Tests for coerce_tool_input_to_dict helper."""
+
+    def test_dict_passthrough(self):
+        """What it does: Dicts pass through unchanged."""
+        assert coerce_tool_input_to_dict({"a": 1}) == {"a": 1}
+        assert coerce_tool_input_to_dict({}) == {}
+
+    def test_valid_json_object_string(self):
+        """What it does: JSON object strings are parsed."""
+        assert coerce_tool_input_to_dict('{"a": 1}') == {"a": 1}
+
+    def test_invalid_json_string(self):
+        """What it does: Invalid JSON strings degrade to {}."""
+        assert coerce_tool_input_to_dict(":") == {}
+        assert coerce_tool_input_to_dict("not json at all") == {}
+
+    def test_empty_and_whitespace_strings(self):
+        """What it does: Empty/whitespace strings become {}."""
+        assert coerce_tool_input_to_dict("") == {}
+        assert coerce_tool_input_to_dict("   ") == {}
+
+    def test_non_object_json(self):
+        """What it does: Valid JSON that is not an object becomes {}."""
+        assert coerce_tool_input_to_dict("[1, 2]") == {}
+        assert coerce_tool_input_to_dict("42") == {}
+        assert coerce_tool_input_to_dict('"str"') == {}
+
+    def test_none_and_native_non_objects(self):
+        """What it does: None, arrays, and scalars become empty objects."""
+        assert coerce_tool_input_to_dict(None) == {}
+        assert coerce_tool_input_to_dict([]) == {}
+        assert coerce_tool_input_to_dict([1]) == {}
+        assert coerce_tool_input_to_dict(42) == {}
+        assert coerce_tool_input_to_dict(True) == {}
 
 
 # ==================================================================================================
@@ -6158,14 +6437,11 @@ class TestGetTruncationRecoverySystemAddition:
         Purpose: Ensure legitimization text is present when recovery is enabled.
         """
         print("Setup: TRUNCATION_RECOVERY=true...")
-        
+        from kiro import config
+        from kiro.converters_core import get_truncation_recovery_system_addition
+
         print("Action: Getting truncation recovery system addition...")
-        with patch.dict(os.environ, {"TRUNCATION_RECOVERY": "true"}):
-            from importlib import reload
-            from kiro import config
-            reload(config)
-            
-            from kiro.converters_core import get_truncation_recovery_system_addition
+        with patch.object(config, "TRUNCATION_RECOVERY", True):
             addition = get_truncation_recovery_system_addition()
             print(f"Addition length: {len(addition)} chars")
         
@@ -6190,14 +6466,11 @@ class TestGetTruncationRecoverySystemAddition:
         Purpose: Ensure no system prompt pollution when feature is off.
         """
         print("Setup: TRUNCATION_RECOVERY=false...")
-        
+        from kiro import config
+        from kiro.converters_core import get_truncation_recovery_system_addition
+
         print("Action: Getting truncation recovery system addition...")
-        with patch.dict(os.environ, {"TRUNCATION_RECOVERY": "false"}):
-            from importlib import reload
-            from kiro import config
-            reload(config)
-            
-            from kiro.converters_core import get_truncation_recovery_system_addition
+        with patch.object(config, "TRUNCATION_RECOVERY", False):
             addition = get_truncation_recovery_system_addition()
             print(f"Addition: '{addition}'")
         
@@ -6210,14 +6483,11 @@ class TestGetTruncationRecoverySystemAddition:
         Purpose: Ensure proper markdown formatting and structure.
         """
         print("Setup: TRUNCATION_RECOVERY=true...")
-        
+        from kiro import config
+        from kiro.converters_core import get_truncation_recovery_system_addition
+
         print("Action: Getting truncation recovery system addition...")
-        with patch.dict(os.environ, {"TRUNCATION_RECOVERY": "true"}):
-            from importlib import reload
-            from kiro import config
-            reload(config)
-            
-            from kiro.converters_core import get_truncation_recovery_system_addition
+        with patch.object(config, "TRUNCATION_RECOVERY", True):
             addition = get_truncation_recovery_system_addition()
         
         print("Checking that addition starts with separator...")
@@ -6455,3 +6725,210 @@ class TestBuildKiroPayloadWithThinkingConfig:
         print(f"Checking for <max_thinking_length>7000</max_thinking_length> in content...")
         assert "<max_thinking_length>7000</max_thinking_length>" in content
         assert "<thinking_mode>enabled</thinking_mode>" in content
+
+
+class TestBuildToolChoiceDirective:
+    """Tests for build_tool_choice_directive (tool_choice enforcement)."""
+
+    def test_none_returns_empty(self):
+        assert build_tool_choice_directive(None) == ""
+
+    def test_auto_string_returns_empty(self):
+        assert build_tool_choice_directive("auto") == ""
+
+    def test_auto_dict_returns_empty(self):
+        assert build_tool_choice_directive({"type": "auto"}) == ""
+
+    def test_required_string_forces_any_tool(self):
+        directive = build_tool_choice_directive("required")
+        assert "MUST call at least one tool" in directive
+
+    def test_any_string_forces_any_tool(self):
+        directive = build_tool_choice_directive("any")
+        assert "MUST call at least one tool" in directive
+
+    def test_openai_named_function(self):
+        directive = build_tool_choice_directive(
+            {"type": "function", "function": {"name": "Read"}}
+        )
+        assert "'Read'" in directive
+        assert "MUST call the tool named" in directive
+
+    def test_anthropic_named_tool(self):
+        directive = build_tool_choice_directive({"type": "tool", "name": "Bash"})
+        assert "'Bash'" in directive
+        assert "MUST call the tool named" in directive
+
+    def test_anthropic_any_type(self):
+        directive = build_tool_choice_directive({"type": "any"})
+        assert "MUST call at least one tool" in directive
+
+    def test_none_string_forbids_tools(self):
+        directive = build_tool_choice_directive("none")
+        assert "must NOT call any tool" in directive
+
+    def test_none_type_forbids_tools(self):
+        directive = build_tool_choice_directive({"type": "none"})
+        assert "must NOT call any tool" in directive
+
+    def test_named_without_name_returns_empty(self):
+        assert build_tool_choice_directive({"type": "tool"}) == ""
+        assert build_tool_choice_directive(
+            {"type": "function", "function": {}}
+        ) == ""
+
+    def test_unknown_shape_returns_empty(self):
+        assert build_tool_choice_directive(42) == ""
+        assert build_tool_choice_directive({"type": "weird"}) == ""
+
+
+class TestToolChoicePolicy:
+    """Tests for strict cross-protocol tool-choice normalization."""
+
+    @pytest.fixture
+    def tools(self):
+        return [UnifiedTool(name="Read"), UnifiedTool(name="Bash")]
+
+    @pytest.mark.parametrize(
+        ("raw", "protocol", "mode", "name"),
+        [
+            ("auto", "openai", "auto", None),
+            ("none", "openai", "none", None),
+            ("required", "openai", "required", None),
+            ({"type": "function", "function": {"name": "Read"}}, "openai", "named", "Read"),
+            ({"type": "auto"}, "anthropic", "auto", None),
+            ({"type": "none"}, "anthropic", "none", None),
+            ({"type": "any"}, "anthropic", "required", None),
+            ({"type": "tool", "name": "Bash"}, "anthropic", "named", "Bash"),
+        ],
+    )
+    def test_parses_supported_policies(self, tools, raw, protocol, mode, name):
+        policy = parse_tool_choice_policy(raw, tools, protocol)
+        assert policy.mode == mode
+        assert policy.tool_name == name
+
+    @pytest.mark.parametrize(
+        ("raw", "protocol"),
+        [
+            ("any", "openai"),
+            ({"type": "function", "function": {}}, "openai"),
+            ({"type": "invalid"}, "anthropic"),
+            ({"type": "tool"}, "anthropic"),
+            ({"type": "auto", "name": "Read"}, "anthropic"),
+        ],
+    )
+    def test_rejects_invalid_structures(self, tools, raw, protocol):
+        with pytest.raises(ValueError):
+            parse_tool_choice_policy(raw, tools, protocol)
+
+    def test_rejects_required_without_tools(self):
+        with pytest.raises(ValueError, match="at least one tool"):
+            parse_tool_choice_policy("required", None, "openai")
+
+    def test_rejects_unknown_named_tool(self, tools):
+        with pytest.raises(ValueError, match="unknown tool"):
+            parse_tool_choice_policy(
+                {"type": "function", "function": {"name": "Missing"}},
+                tools,
+                "openai",
+            )
+
+    def test_named_policy_filters_before_aliasing(self, tools):
+        policy = parse_tool_choice_policy(
+            {"type": "function", "function": {"name": "Read"}},
+            tools,
+            "openai",
+        )
+        assert [tool.name for tool in policy.filter_tools(tools)] == ["Read"]
+
+    def test_named_policy_text_converts_undeclared_history_tools(self):
+        messages = [
+            UnifiedMessage(role="user", content="Run Bash"),
+            UnifiedMessage(
+                role="assistant",
+                content="",
+                tool_calls=[{
+                    "id": "call_bash",
+                    "type": "function",
+                    "function": {"name": "Bash", "arguments": "{}"},
+                }],
+            ),
+            UnifiedMessage(
+                role="user",
+                content="",
+                tool_results=[{
+                    "type": "tool_result",
+                    "tool_use_id": "call_bash",
+                    "content": "ok",
+                }],
+            ),
+            UnifiedMessage(role="assistant", content="Finished"),
+            UnifiedMessage(role="user", content="Now read"),
+        ]
+        result = build_kiro_payload(
+            messages=messages,
+            system_prompt="",
+            model_id="test-model",
+            tools=[UnifiedTool(name="Read", input_schema={})],
+            conversation_id="test-conversation",
+            profile_arn="",
+            thinking_config=ThinkingConfig(enabled=False),
+        )
+
+        payload = result.payload
+        history_json = json.dumps(payload["conversationState"]["history"])
+        current_context = payload["conversationState"]["currentMessage"]["userInputMessage"][
+            "userInputMessageContext"
+        ]
+        assert "[Tool: Bash (call_bash)]" in history_json
+        assert "toolUses" not in history_json
+        assert "toolResults" not in history_json
+        assert [
+            tool["toolSpecification"]["name"] for tool in current_context["tools"]
+        ] == ["Read"]
+
+    def test_none_preserves_tool_history_as_text(self):
+        messages = [
+            UnifiedMessage(role="user", content="Run it"),
+            UnifiedMessage(
+                role="assistant",
+                content="",
+                tool_calls=[{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                }],
+            ),
+            UnifiedMessage(
+                role="user",
+                content="",
+                tool_results=[{
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": "done",
+                }],
+            ),
+            UnifiedMessage(role="assistant", content="Finished"),
+            UnifiedMessage(role="user", content="Continue without tools"),
+        ]
+        result = build_kiro_payload(
+            messages=messages,
+            system_prompt="",
+            model_id="test-model",
+            tools=None,
+            conversation_id="test-conversation",
+            profile_arn="",
+            thinking_config=ThinkingConfig(enabled=False),
+        )
+        history = result.payload["conversationState"]["history"]
+        serialized_history = json.dumps(history)
+        assert "[Tool: Read (call_1)]" in serialized_history
+        assert "[Tool Result (call_1)]" in serialized_history
+        assert "done" in serialized_history
+        assert "toolUses" not in serialized_history
+        assert "toolResults" not in serialized_history
+        current_context = result.payload["conversationState"]["currentMessage"]["userInputMessage"].get(
+            "userInputMessageContext",
+            {},
+        )
+        assert "tools" not in current_context

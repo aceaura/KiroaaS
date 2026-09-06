@@ -175,32 +175,35 @@ def deduplicate_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, A
         if existing is None:
             by_id[tc_id] = tc
         else:
-            # Duplicate by id exists - keep the one with more arguments
             existing_args = existing.get("function", {}).get("arguments", "{}")
             current_args = tc.get("function", {}).get("arguments", "{}")
-            
-            # Prefer non-empty arguments
-            if current_args != "{}" and (existing_args == "{}" or len(current_args) > len(existing_args)):
+            existing_invalid = bool(existing.get("_arguments_invalid"))
+            current_invalid = bool(tc.get("_arguments_invalid"))
+
+            if not current_invalid and current_args != "{}" and (
+                existing_invalid or existing_args == "{}" or len(current_args) > len(existing_args)
+            ):
                 logger.debug(f"Replacing tool call {tc_id} with better arguments: {len(existing_args)} -> {len(current_args)}")
                 by_id[tc_id] = tc
-    
-    # Collect tool calls: first those with id, then without id
+            elif current_invalid and (existing_invalid or existing_args == "{}"):
+                existing["_arguments_invalid"] = True
+
     result_with_id = list(by_id.values())
     result_without_id = [tc for tc in tool_calls if not tc.get("id")]
-    
-    # Now deduplicate by name+arguments for all
-    seen = set()
+
+    seen: Dict[str, int] = {}
     unique = []
-    
+
     for tc in result_with_id + result_without_id:
-        # Protection against None in function
         func = tc.get("function") or {}
         func_name = func.get("name") or ""
         func_args = func.get("arguments") or "{}"
         key = f"{func_name}-{func_args}"
         if key not in seen:
-            seen.add(key)
+            seen[key] = len(unique)
             unique.append(tc)
+        elif tc.get("_arguments_invalid") and func_args == "{}":
+            unique[seen[key]]["_arguments_invalid"] = True
     
     if len(tool_calls) != len(unique):
         logger.debug(f"Deduplicated tool calls: {len(tool_calls)} -> {len(unique)}")
@@ -442,7 +445,8 @@ class AwsEventStreamParser:
                     else:
                         # Regular JSON parse error
                         logger.warning(f"Failed to parse tool '{tool_name}' arguments: {e}. Raw: {args[:200]}")
-                    
+
+                    self.current_tool_call['_arguments_invalid'] = True
                     self.current_tool_call['function']['arguments'] = "{}"
             else:
                 # Empty string - use empty object
@@ -454,8 +458,10 @@ class AwsEventStreamParser:
             self.current_tool_call['function']['arguments'] = json.dumps(args)
             logger.debug(f"Tool '{tool_name}' arguments already dict with keys: {list(args.keys())}")
         else:
-            # Unknown type - empty object
+            # Unknown type - empty object for compatibility, but retain a marker
+            # so strict tool-choice requests can reject the original violation.
             logger.warning(f"Tool '{tool_name}' has unexpected arguments type: {type(args)}")
+            self.current_tool_call['_arguments_invalid'] = True
             self.current_tool_call['function']['arguments'] = "{}"
         
         self.tool_calls.append(self.current_tool_call)
