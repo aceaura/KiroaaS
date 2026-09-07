@@ -724,6 +724,19 @@ fn main() {
     let system_tray = SystemTray::new().with_menu(tray_menu);
 
     tauri::Builder::default()
+        // Registered first so a duplicate launch is handed off before the second
+        // process does any other setup work.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // The app hides to tray instead of exiting, so the running window is
+            // often hidden or minimized rather than merely unfocused.
+            if let Some(window) = app.get_window("main") {
+                #[cfg(target_os = "macos")]
+                macos_dock::set_dock_visible(true);
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .system_tray(system_tray)
         .on_system_tray_event(|app, event| match event {
             SystemTrayEvent::DoubleClick { .. } => {
