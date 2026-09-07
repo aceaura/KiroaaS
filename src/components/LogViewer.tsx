@@ -16,20 +16,22 @@ function stripAnsi(text: string): string {
     return text.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
 }
 
-// Extract timestamp from log line (e.g., "2026-02-10 18:11:11 | ...")
-const TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s*\|/;
-function extractTimestamp(log: string): string {
-    const m = log.match(TIMESTAMP_RE);
-    if (m) {
-        // Return HH:MM:SS portion
-        return m[1].split(/\s+/)[1];
-    }
-    return '';
-}
+// Parse the loguru header of a log line, e.g. "2026-02-10 18:11:11 | WARNING  | module:fn:12 - msg"
+const HEADER_RE = /^\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2}:\d{2})\s*\|\s*(\w+)\s*\|/;
+
+// Levels that need to stand out. Anything else keeps the default text color.
+const LEVEL_TEXT_CLASS: Record<string, string> = {
+    WARNING: 'text-amber-400 group-hover/line:text-amber-300',
+    ERROR: 'text-red-400 group-hover/line:text-red-300',
+    CRITICAL: 'text-red-400 group-hover/line:text-red-300',
+};
+
+const DEFAULT_TEXT_CLASS = 'text-stone-300 group-hover/line:text-white';
 
 interface ProcessedLog {
     text: string;
     time: string;
+    level: string;
 }
 
 const LogLine = memo(({ log, index }: { log: ProcessedLog; index: number }) => (
@@ -37,7 +39,11 @@ const LogLine = memo(({ log, index }: { log: ProcessedLog; index: number }) => (
         <span className="text-stone-600 text-xs select-none w-[80px] flex-shrink-0 text-right font-mono opacity-50">
             {log.time}
         </span>
-        <span className="break-all whitespace-pre-wrap flex-1 text-stone-300 group-hover/line:text-white transition-colors">
+        <span
+            className={`break-all whitespace-pre-wrap flex-1 transition-colors ${
+                LEVEL_TEXT_CLASS[log.level] ?? DEFAULT_TEXT_CLASS
+            }`}
+        >
             {log.text}
         </span>
     </div>
@@ -58,9 +64,11 @@ export function LogViewer({ logs = [], onLogsCleared }: LogViewerProps) {
         const sliced = logs.length > MAX_VISIBLE_LOGS ? logs.slice(-MAX_VISIBLE_LOGS) : logs;
         return sliced.map(log => {
             const cleaned = stripAnsi(log);
+            const header = cleaned.match(HEADER_RE);
             return {
                 text: cleaned,
-                time: extractTimestamp(cleaned),
+                time: header ? header[1] : '',
+                level: header ? header[2].toUpperCase() : '',
             };
         });
     }, [logs]);
