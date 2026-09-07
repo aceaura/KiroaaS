@@ -6691,6 +6691,69 @@ class TestInjectThinkingTagsWithConfig:
         print(f"Checking for <max_thinking_length>50000</max_thinking_length>...")
         assert "<max_thinking_length>50000</max_thinking_length>" in result
 
+    def test_applies_cap_to_default_budget(self, monkeypatch):
+        """
+        What it does: Verifies the cap also applies when no client budget is given
+        Purpose: A FAKE_REASONING_MAX_TOKENS above the cap must not bypass capping
+        """
+        from unittest.mock import patch
+
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_MAX_TOKENS", 50000)
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_BUDGET_CAP", 10000)
+
+        config = ThinkingConfig(enabled=True)
+
+        with patch("kiro.converters_core.logger.warning") as mock_warning:
+            result = inject_thinking_tags("Test content", config)
+
+            assert "<max_thinking_length>10000</max_thinking_length>" in result
+            assert "<max_thinking_length>50000</max_thinking_length>" not in result
+            assert mock_warning.called, "cap warning must fire on the default budget path"
+            assert "exceeds cap" in mock_warning.call_args[0][0]
+
+    def test_default_budget_below_cap_is_unchanged(self, monkeypatch):
+        """
+        What it does: Verifies a default budget under the cap passes through untouched
+        Purpose: Capping must not alter the shipped default configuration
+        """
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_MAX_TOKENS", 4000)
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_BUDGET_CAP", 10000)
+
+        result = inject_thinking_tags("Test content", ThinkingConfig(enabled=True))
+
+        assert "<max_thinking_length>4000</max_thinking_length>" in result
+
+    def test_default_budget_uncapped_when_cap_zero(self, monkeypatch):
+        """
+        What it does: Verifies cap=0 disables capping on the default budget path too
+        Purpose: Users disabling the cap must get the raw configured default
+        """
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_MAX_TOKENS", 50000)
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_BUDGET_CAP", 0)
+
+        result = inject_thinking_tags("Test content", ThinkingConfig(enabled=True))
+
+        assert "<max_thinking_length>50000</max_thinking_length>" in result
+
+    def test_effort_path_ignores_budget_cap(self, monkeypatch):
+        """
+        What it does: Verifies qualitative effort emits no max_thinking_length tag
+        Purpose: The cap restructure must not leak a numeric budget into the effort path
+        """
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_MAX_TOKENS", 50000)
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_BUDGET_CAP", 10000)
+
+        result = inject_thinking_tags(
+            "Test content", ThinkingConfig(enabled=True, effort="high")
+        )
+
+        assert "<thinking_effort>high</thinking_effort>" in result
+        assert "max_thinking_length" not in result
+
 
 class TestBuildKiroPayloadWithThinkingConfig:
     """Tests for build_kiro_payload with thinking_config parameter."""

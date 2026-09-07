@@ -809,11 +809,25 @@ def format_anthropic_response_from_result(
         and not result.tool_calls
     )
     if content_was_truncated:
+        from kiro.config import TRUNCATION_RECOVERY
+        logger.error(
+            f"Content truncated by Kiro API (non-streaming): stream ended without completion signals, "
+            f"length={len(result.content)} chars. "
+            f"{'Model will be notified automatically about truncation.' if TRUNCATION_RECOVERY else 'Set TRUNCATION_RECOVERY=true in .env to auto-notify model about truncation.'}"
+        )
+
+    if content_was_truncated:
         stop_reason = "max_tokens"
     elif result.tool_calls:
         stop_reason = "tool_use"
     else:
         stop_reason = "end_turn"
+
+    logger.debug(
+        f"[Anthropic Non-Streaming] Completed: "
+        f"input_tokens={input_tokens}, output_tokens={output_tokens}, "
+        f"tool_calls={len(result.tool_calls)}, stop_reason={stop_reason}"
+    )
 
     usage: Dict[str, Any] = {
         "input_tokens": input_tokens,

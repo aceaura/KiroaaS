@@ -488,21 +488,24 @@ def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
     if thinking_config.effort is not None:
         control_tag = f"<thinking_effort>{thinking_config.effort}</thinking_effort>"
         logger.debug(f"Injecting thinking tags with effort='{thinking_config.effort}'")
-    elif thinking_config.budget_tokens is not None:
-        effective_budget = thinking_config.budget_tokens
+    else:
+        if thinking_config.budget_tokens is not None:
+            effective_budget = thinking_config.budget_tokens
+            budget_source = "explicit"
+        else:
+            effective_budget = FAKE_REASONING_MAX_TOKENS
+            budget_source = "default"
+
         if FAKE_REASONING_BUDGET_CAP > 0 and effective_budget > FAKE_REASONING_BUDGET_CAP:
             logger.warning(
-                f"Client requested thinking budget {effective_budget} exceeds cap {FAKE_REASONING_BUDGET_CAP}. "
+                f"Thinking budget {effective_budget} ({budget_source}) exceeds cap {FAKE_REASONING_BUDGET_CAP}. "
                 f"Using capped value {FAKE_REASONING_BUDGET_CAP}. "
                 f"Set FAKE_REASONING_BUDGET_CAP=0 to disable capping."
             )
             effective_budget = FAKE_REASONING_BUDGET_CAP
+
         control_tag = f"<max_thinking_length>{effective_budget}</max_thinking_length>"
-        logger.debug(f"Injecting thinking tags with explicit budget={effective_budget}")
-    else:
-        effective_budget = FAKE_REASONING_MAX_TOKENS
-        control_tag = f"<max_thinking_length>{effective_budget}</max_thinking_length>"
-        logger.debug(f"Injecting thinking tags with default budget={effective_budget}")
+        logger.debug(f"Injecting thinking tags with {budget_source} budget={effective_budget}")
 
     thinking_prefix = (
         "<thinking_mode>enabled</thinking_mode>\n"

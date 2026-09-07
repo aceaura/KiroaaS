@@ -310,6 +310,49 @@ class TestValidatedAnthropicResultEncoding:
         assert thinking_block["type"] == "thinking"
         assert thinking_block["signature"] == "native_sig_from_kiro"
 
+    def test_logs_truncation_with_recovery_hint(self, mock_model_cache):
+        """A silently truncated non-streaming response must be logged for operators."""
+        with patch("kiro.config.TRUNCATION_RECOVERY", False):
+            with patch("kiro.streaming_anthropic.logger.error") as mock_error:
+                response = format_anthropic_response_from_result(
+                    StreamResult(content="cut off"),
+                    "claude-sonnet-4",
+                    mock_model_cache,
+                )
+
+        assert response["stop_reason"] == "max_tokens"
+        assert mock_error.called
+        message = mock_error.call_args[0][0]
+        assert "truncated" in message
+        assert "TRUNCATION_RECOVERY=true" in message
+
+    def test_logs_truncation_when_recovery_enabled(self, mock_model_cache):
+        """With recovery on, the log states the model is notified automatically."""
+        with patch("kiro.config.TRUNCATION_RECOVERY", True):
+            with patch("kiro.streaming_anthropic.logger.error") as mock_error:
+                format_anthropic_response_from_result(
+                    StreamResult(content="cut off"),
+                    "claude-sonnet-4",
+                    mock_model_cache,
+                )
+
+        assert mock_error.called
+        message = mock_error.call_args[0][0]
+        assert "notified automatically" in message
+        assert "TRUNCATION_RECOVERY=true" not in message
+
+    def test_does_not_log_truncation_on_normal_completion(self, mock_model_cache):
+        """A result with completion signals must not emit a truncation error."""
+        with patch("kiro.streaming_anthropic.logger.error") as mock_error:
+            response = format_anthropic_response_from_result(
+                StreamResult(content="all done", completed_normally=True),
+                "claude-sonnet-4",
+                mock_model_cache,
+            )
+
+        assert response["stop_reason"] == "end_turn"
+        assert not mock_error.called
+
 
 # ==================================================================================================
 # Tests for stream_kiro_to_anthropic()
