@@ -41,7 +41,7 @@ def _include_router_arg_names(module_filename):
     A router passed via an alias shows up under the alias name, so it will not
     silently satisfy an expected list of real router names.
     """
-    tree = ast.parse((_BACKEND_ROOT / module_filename).read_text())
+    tree = ast.parse((_BACKEND_ROOT / module_filename).read_text(encoding="utf-8"))
     names = []
     for node in ast.walk(tree):
         if (
