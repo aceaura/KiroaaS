@@ -28,7 +28,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-from kiro.config import EFFORT_FALLBACK, EFFORT_ORDER, HIDDEN_MODELS, MODEL_ALIASES
+from kiro.config import (
+    EFFORT_FALLBACK,
+    EFFORT_ORDER,
+    GPT_EDIT_RECOVERY,
+    HIDDEN_MODELS,
+    MODEL_ALIASES,
+)
 from kiro.model_resolver import get_model_id_for_kiro
 from kiro.effort_schema import resolve_first_token_timeout
 from kiro.models_anthropic import (
@@ -47,6 +53,7 @@ from kiro.converters_core import (
     extract_text_content,
     extract_images_from_content,
 )
+from kiro.request_audit import RequestAudit
 
 
 def convert_anthropic_content_to_text(content: Any) -> str:
@@ -77,6 +84,132 @@ def convert_anthropic_content_to_text(content: Any) -> str:
         return "".join(text_parts)
 
     return str(content) if content else ""
+
+
+EDIT_TOOL_MISMATCH = "String to replace not found in file"
+
+
+GPT_EDIT_RECOVERY_POLICY = (
+    "\n\n---\n"
+    "# Claude Code Edit Recovery\n\n"
+    "When using Claude Code's Edit tool, copy `old_string` exactly from the "
+    "latest contents returned by Read. Keep each replacement small and unique. "
+    "If an Edit tool result says `String to replace not found in file`, do not "
+    "repeat that Edit call or its arguments: first Read the same target file "
+    "again, then create a new Edit from the latest text.\n"
+)
+
+
+GPT_EDIT_RECOVERY_NOTICE = (
+    "\n\n[Edit Recovery Notice] The previous Edit failed because its old_string "
+    "did not match the current file. Do not repeat the same Edit parameters. "
+    "Read the target file now, then retry with a small, unique old_string "
+    "copied exactly from that latest Read result.\n"
+)
+
+
+def is_gpt_model(model: Any) -> bool:
+    """Return whether an Anthropic request targets a GPT model.
+
+    Args:
+        model: Client-supplied model name.
+
+    Returns:
+        True when the name identifies a GPT model.
+    """
+    if not isinstance(model, str):
+        return False
+    normalized = model.strip().lower()
+    return normalized.startswith(("gpt-", "gpt_"))
+
+
+def _block_value(block: Any, key: str, default: Any = None) -> Any:
+    """Read a field from a content block held as either a dict or a model."""
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def has_unrecovered_edit_mismatch(messages: Any) -> bool:
+    """Detect a latest, unrecovered Claude Code Edit replacement failure.
+
+    The gateway cannot inspect the local workspace. It only uses the Anthropic
+    tool-use/tool-result history and deliberately treats the latest tool event
+    as authoritative: a later assistant tool call (for example Read) clears the
+    pending failure, so the recovery notice is emitted at most once per failure.
+
+    Args:
+        messages: Anthropic request messages.
+
+    Returns:
+        True when the most recent tool event is an unrecovered Edit mismatch.
+    """
+    if not isinstance(messages, list):
+        return False
+
+    pending_edit_ids: Set[str] = set()
+    latest_tool_event_is_edit_mismatch = False
+
+    for message in messages:
+        role = _block_value(message, "role", "")
+        content = _block_value(message, "content", None)
+        blocks = content if isinstance(content, list) else []
+
+        if role == "assistant":
+            assistant_called_tool = False
+            for block in blocks:
+                if _block_value(block, "type") != "tool_use":
+                    continue
+                assistant_called_tool = True
+                latest_tool_event_is_edit_mismatch = False
+                tool_id = _block_value(block, "id")
+                tool_name = str(_block_value(block, "name", ""))
+                if tool_id and tool_name.lower() == "edit":
+                    pending_edit_ids.add(tool_id)
+
+            # Any assistant tool call means the model has started a new step;
+            # do not carry a prior failure past it.
+            if assistant_called_tool:
+                continue
+
+        if role != "user":
+            continue
+
+        for block in blocks:
+            if _block_value(block, "type") != "tool_result":
+                continue
+            latest_tool_event_is_edit_mismatch = False
+            tool_id = _block_value(block, "tool_use_id")
+            if tool_id not in pending_edit_ids:
+                continue
+            pending_edit_ids.discard(tool_id)
+            result_text = convert_anthropic_content_to_text(
+                _block_value(block, "content", "")
+            )
+            latest_tool_event_is_edit_mismatch = EDIT_TOOL_MISMATCH in result_text
+
+    return latest_tool_event_is_edit_mismatch
+
+
+def build_gpt_edit_recovery_directive(model: Any, messages: Any) -> str:
+    """Build the GPT-only Edit policy and one-shot recovery notice.
+
+    Args:
+        model: Client-supplied model name.
+        messages: Anthropic request messages.
+
+    Returns:
+        Directive text to append to the system prompt, or an empty string when
+        the feature is disabled or the request does not target a GPT model.
+    """
+    if not GPT_EDIT_RECOVERY:
+        return ""
+    if not is_gpt_model(model):
+        return ""
+    directive = GPT_EDIT_RECOVERY_POLICY
+    if has_unrecovered_edit_mismatch(messages):
+        directive += GPT_EDIT_RECOVERY_NOTICE
+    return directive
 
 
 def extract_system_prompt(system: Any) -> str:
@@ -472,7 +605,10 @@ def resolve_anthropic_first_token_timeout(request: AnthropicMessagesRequest) -> 
 
 
 def anthropic_to_kiro(
-    request: AnthropicMessagesRequest, conversation_id: str, profile_arn: str
+    request: AnthropicMessagesRequest,
+    conversation_id: str,
+    profile_arn: str,
+    request_audit: Optional[RequestAudit] = None,
 ) -> dict:
     """
     Converts Anthropic Messages API request to Kiro API payload.
@@ -488,6 +624,7 @@ def anthropic_to_kiro(
         request: Anthropic MessagesRequest
         conversation_id: Unique conversation ID
         profile_arn: AWS CodeWhisperer profile ARN
+        request_audit: Optional request audit state shared with the response stream
 
     Returns:
         Payload dictionary for POST request to Kiro API
@@ -508,6 +645,15 @@ def anthropic_to_kiro(
     tool_choice_directive = tool_choice_policy.build_directive()
     if tool_choice_directive:
         system_prompt = system_prompt + tool_choice_directive if system_prompt else tool_choice_directive.strip()
+
+    # Opt-in via GPT_EDIT_RECOVERY. Anthropic path only; OpenAI conversion is untouched.
+    edit_recovery_directive = build_gpt_edit_recovery_directive(request.model, request.messages)
+    if edit_recovery_directive:
+        system_prompt = (
+            system_prompt + edit_recovery_directive
+            if system_prompt
+            else edit_recovery_directive.strip()
+        )
 
     # Get model ID for Kiro API (normalizes + resolves hidden models)
     # Pass-through principle: we normalize and send to Kiro, Kiro decides if valid
@@ -539,6 +685,7 @@ def anthropic_to_kiro(
         profile_arn=profile_arn,
         thinking_config=thinking_config,
         native_thinking=native_thinking,
+        request_audit=request_audit,
     )
 
     return result.payload

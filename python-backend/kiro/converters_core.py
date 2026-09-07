@@ -52,6 +52,7 @@ from kiro.effort_schema import (
     lookup_effort_schema,
     resolve_effort_decision,
 )
+from kiro.request_audit import RequestAudit
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 
 
@@ -1634,6 +1635,7 @@ def build_kiro_payload(
     profile_arn: str,
     thinking_config: ThinkingConfig,
     native_thinking: Optional[Dict[str, Any]] = None,
+    request_audit: Optional[RequestAudit] = None,
 ) -> KiroPayloadResult:
     """
     Builds complete payload for Kiro API from unified data.
@@ -1673,16 +1675,19 @@ def build_kiro_payload(
     else:
         requested_effort = thinking_config.effort
     effort_decision = resolve_effort_decision(model_id, requested_effort)
-    logger.info(
-        "effort_decision "
-        f"model={model_id} "
-        f"requested={effort_decision.requested or 'none'} "
-        f"adopted={effort_decision.adopted or 'none'} "
-        f"field={effort_decision.field or 'none'} "
-        f"outcome={effort_decision.outcome} "
-        f"clamped={str(effort_decision.clamped).lower()} "
-        f"reason={effort_decision.reason}"
-    )
+    if request_audit is not None:
+        request_audit.record_effort(model_id, effort_decision)
+    else:
+        logger.info(
+            "effort_decision "
+            f"model={model_id} "
+            f"requested={effort_decision.requested or 'none'} "
+            f"adopted={effort_decision.adopted or 'none'} "
+            f"field={effort_decision.field or 'none'} "
+            f"outcome={effort_decision.outcome} "
+            f"clamped={str(effort_decision.clamped).lower()} "
+            f"reason={effort_decision.reason}"
+        )
 
     native_fragment: Dict[str, Any] = (
         dict(effort_decision.fragment) if effort_decision.fragment is not None else {}

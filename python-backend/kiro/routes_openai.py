@@ -66,6 +66,7 @@ from kiro.streaming_core import (
     ToolChoiceViolation,
     ToolChoiceUpstreamError,
 )
+from kiro.request_audit import RequestAudit
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
 from kiro.config import WEB_SEARCH_ENABLED
@@ -293,6 +294,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # One audit object per client request: keeps the audit ID stable across
+    # account failover and first-token retries.
+    request_audit = RequestAudit(protocol="openai", client_model=request_data.model)
+
     # ==============================================================================
     # Account System: Account System Failover or Legacy Mode
     # ==============================================================================
@@ -352,7 +357,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 kiro_payload = build_kiro_payload(
                     request_data,
                     conversation_id,
-                    profile_arn_for_payload
+                    profile_arn_for_payload,
+                    request_audit=request_audit,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
@@ -407,6 +413,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                 allowed_names=allowed_tool_names,
                                 payload=kiro_payload,
                                 first_token_timeout=first_token_timeout,
+                                request_audit=request_audit,
                             )
                         except ToolChoiceViolation as exc:
                             await http_client.close()
@@ -456,6 +463,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                             request_tools=tools_for_tokenizer,
                         )
                         await account_manager.report_success(account.id, request_data.model)
+                        request_audit.log_credit_once(status="completed")
                         await http_client.close()
                         if debug_logger:
                             debug_logger.discard_buffers()
@@ -489,7 +497,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                     initial_response=response,
                                     first_token_timeout=first_token_timeout,
                                     request_messages=messages_for_tokenizer,
-                                    request_tools=tools_for_tokenizer
+                                    request_tools=tools_for_tokenizer,
+                                    request_audit=request_audit,
                                 ):
                                     yield chunk
                             except GeneratorExit:
@@ -504,6 +513,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                                 raise
                             finally:
                                 await http_client.close()
+                                request_audit.log_credit_once(
+                                    status=(
+                                        "failed" if streaming_error
+                                        else "client_disconnected" if client_disconnected
+                                        else "completed"
+                                    )
+                                )
                                 if streaming_error:
                                     error_type = type(streaming_error).__name__
                                     error_msg = str(streaming_error) if str(streaming_error) else "(empty message)"
@@ -531,8 +547,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                             request_messages=messages_for_tokenizer,
                             request_tools=tools_for_tokenizer,
                             first_token_timeout=first_token_timeout,
+                            request_audit=request_audit,
                         )
 
+                        request_audit.log_credit_once(status="completed")
                         await http_client.close()
                         logger.info(f"HTTP 200 - POST /v1/chat/completions (non-streaming) - completed")
 
@@ -679,7 +697,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         kiro_payload = build_kiro_payload(
             request_data,
             conversation_id,
-            profile_arn_for_payload
+            profile_arn_for_payload,
+            request_audit=request_audit,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -783,6 +802,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     allowed_names=allowed_tool_names,
                     payload=kiro_payload,
                     first_token_timeout=first_token_timeout,
+                    request_audit=request_audit,
                 )
             except ToolChoiceViolation as exc:
                 await http_client.close()
@@ -816,6 +836,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 request_messages=messages_for_tokenizer,
                 request_tools=tools_for_tokenizer,
             )
+            request_audit.log_credit_once(status="completed")
             await http_client.close()
             if debug_logger:
                 debug_logger.discard_buffers()
@@ -848,7 +869,8 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                         initial_response=response,
                         first_token_timeout=first_token_timeout,
                         request_messages=messages_for_tokenizer,
-                        request_tools=tools_for_tokenizer
+                        request_tools=tools_for_tokenizer,
+                        request_audit=request_audit,
                     ):
                         yield chunk
                 except GeneratorExit:
@@ -866,6 +888,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                     raise
                 finally:
                     await http_client.close()
+                    request_audit.log_credit_once(
+                        status=(
+                            "failed" if streaming_error
+                            else "client_disconnected" if client_disconnected
+                            else "completed"
+                        )
+                    )
                     # Log access log for streaming (success or error)
                     if streaming_error:
                         error_type = type(streaming_error).__name__
@@ -896,8 +925,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                 request_messages=messages_for_tokenizer,
                 request_tools=tools_for_tokenizer,
                 first_token_timeout=first_token_timeout,
+                request_audit=request_audit,
             )
 
+            request_audit.log_credit_once(status="completed")
             await http_client.close()
 
             # Log access log for non-streaming success

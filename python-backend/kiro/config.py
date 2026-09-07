@@ -553,6 +553,17 @@ KIRO_MAX_PAYLOAD_BYTES: int = int(os.getenv("KIRO_MAX_PAYLOAD_BYTES", "600000"))
 AUTO_TRIM_PAYLOAD: bool = os.getenv("AUTO_TRIM_PAYLOAD", "false").lower() in ("true", "1", "yes")
 
 # ==================================================================================================
+# GPT Edit Recovery Settings
+# ==================================================================================================
+
+# Append Claude Code Edit recovery guidance to the system prompt for GPT models
+# (default: false - disabled). GPT models can loop on a failed Edit by repeating
+# the same old_string; the directive tells them to re-Read the file first.
+#
+# This modifies the client's system prompt, so it stays opt-in. Anthropic path only.
+GPT_EDIT_RECOVERY: bool = os.getenv("GPT_EDIT_RECOVERY", "false").lower() in ("true", "1", "yes")
+
+# ==================================================================================================
 # WebSearch Settings (MCP Tool Emulation)
 # ==================================================================================================
 

@@ -40,6 +40,7 @@ import httpx
 from loguru import logger
 
 from kiro.parsers import AwsEventStreamParser, parse_bracket_tool_calls, deduplicate_tool_calls
+from kiro.request_audit import RequestAudit
 from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
     FIRST_TOKEN_MAX_RETRIES,
@@ -223,6 +224,7 @@ async def collect_with_tool_choice_retry(
     allowed_names: Set[str],
     payload: Dict[str, Any],
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
+    request_audit: Optional[RequestAudit] = None,
 ) -> StreamResult:
     """Buffer, validate, and retry one semantic violation on the same request path."""
     response = initial_response
@@ -236,6 +238,7 @@ async def collect_with_tool_choice_retry(
             result = await collect_stream_to_result(
                 response,
                 first_token_timeout=first_token_timeout,
+                request_audit=request_audit,
             )
             return validate_tool_choice_result(result, policy, allowed_names)
         except ToolChoiceViolation as violation:
@@ -458,7 +461,8 @@ async def _process_chunk(
 async def collect_stream_to_result(
     response: httpx.Response,
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
-    enable_thinking_parser: bool = True
+    enable_thinking_parser: bool = True,
+    request_audit: Optional[RequestAudit] = None,
 ) -> StreamResult:
     """
     Collects full response from Kiro stream.
@@ -470,6 +474,7 @@ async def collect_stream_to_result(
         response: HTTP response with stream
         first_token_timeout: First token wait timeout
         enable_thinking_parser: Whether to enable thinking block parsing
+        request_audit: Optional audit state accumulating upstream metering events
 
     Returns:
         StreamResult with full content, thinking, tool calls, and usage
@@ -491,6 +496,8 @@ async def collect_stream_to_result(
         elif event.type == "usage" and event.usage is not None:
             result.usage = event.usage
             result.completed_normally = True
+            if request_audit is not None:
+                request_audit.record_metering(event.usage)
         elif event.type == "context_usage" and event.context_usage_percentage is not None:
             result.context_usage_percentage = event.context_usage_percentage
             result.completed_normally = True
