@@ -542,7 +542,7 @@ async def stream_kiro_to_anthropic(
 
             elif event.type == "context_usage" and event.context_usage_percentage is not None:
                 context_usage_percentage = event.context_usage_percentage
-            elif event.type == "usage" and event.usage:
+            elif event.type == "usage" and event.usage is not None:
                 upstream_cache_usage.update(_extract_cache_usage_fields(event.usage))
                 if request_audit is not None:
                     request_audit.record_metering(event.usage)

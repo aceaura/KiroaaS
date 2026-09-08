@@ -13,6 +13,8 @@ Tests for:
 
 import pytest
 import json
+import struct
+import zlib
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +28,31 @@ from kiro.streaming_openai import (
     FirstTokenTimeoutError,
 )
 from kiro.streaming_core import KiroEvent, StreamResult
+
+
+def _aws_string_header(name, value):
+    name_bytes = name.encode()
+    value_bytes = value.encode()
+    return (
+        bytes([len(name_bytes)])
+        + name_bytes
+        + b"\x07"
+        + struct.pack(">H", len(value_bytes))
+        + value_bytes
+    )
+
+
+def _aws_event_frame(event_type, payload):
+    headers = (
+        _aws_string_header(":message-type", "event")
+        + _aws_string_header(":event-type", event_type)
+    )
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    total_length = 16 + len(headers) + len(payload_bytes)
+    prelude_values = struct.pack(">II", total_length, len(headers))
+    prelude = prelude_values + struct.pack(">I", zlib.crc32(prelude_values) & 0xFFFFFFFF)
+    message = prelude + headers + payload_bytes
+    return message + struct.pack(">I", zlib.crc32(message) & 0xFFFFFFFF)
 
 
 # ==================================================================================================
@@ -1546,3 +1573,135 @@ class TestStreamingOpenaiTruncationDetection:
         # Should extract "length" from streaming chunks
         assert result["choices"][0]["finish_reason"] == "length"
         print("✓ collect_stream_response extracts finish_reason correctly")
+
+# ==================================================================================================
+# Tests for the GPT channel over real AWS Event Stream framing
+# ==================================================================================================
+
+class TestStreamingOpenaiGptChannel:
+    """End-to-end tests for the GPT channel: real AWS-framed bytes through
+    the actual AwsEventStreamParser (parse_kiro_stream is NOT mocked)."""
+
+    @staticmethod
+    def _byte_stream(stream: bytes, cuts):
+        async def gen():
+            previous = 0
+            for boundary in cuts:
+                yield stream[previous:boundary]
+                previous = boundary
+            yield stream[previous:]
+        return gen()
+
+    @pytest.mark.asyncio
+    async def test_gpt_fragmented_tool_call_reassembled_and_metered(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Streams AWS-framed GPT output whose tool input arrives as
+            many toolUseEvent fragments that all repeat name+toolUseId.
+        Purpose: End-to-end regression for the GPT channel: the OpenAI client
+            must receive one tool call with the complete arguments, plus the
+            metering credit from the meteringEvent frame.
+        """
+        print("Setup: AWS-framed GPT stream with fragmented tool input...")
+        tid = "call_gpt_1"
+        frames = [
+            _aws_event_frame("assistantResponseEvent", {"content": "Reading the file."}),
+            _aws_event_frame("toolUseEvent", {"name": "Read", "toolUseId": tid}),
+        ]
+        for frag in ['{"', "file", "_path", '":', '"/', "etc", "/", "hostname", '"}']:
+            frames.append(_aws_event_frame(
+                "toolUseEvent", {"input": frag, "name": "Read", "toolUseId": tid},
+            ))
+        frames.append(_aws_event_frame(
+            "toolUseEvent", {"name": "Read", "stop": True, "toolUseId": tid},
+        ))
+        frames.append(_aws_event_frame(
+            "meteringEvent", {"inputTokens": 12, "usage": 0.06745126666668, "outputTokens": 4},
+        ))
+        stream = b"".join(frames)
+
+        print("Action: Streaming through the real parser, split mid-frame...")
+        mock_response.aiter_bytes = lambda: self._byte_stream(stream, (13, 57, 104))
+        chunks = []
+        async for chunk in stream_kiro_to_openai(
+            mock_http_client, mock_response, "gpt-5.6-sol",
+            mock_model_cache, mock_auth_manager
+        ):
+            chunks.append(chunk)
+
+        print(f"Received {len(chunks)} chunks")
+        data_chunks = [
+            json.loads(c[len("data: "):])
+            for c in chunks
+            if c.startswith("data: ") and c != "data: [DONE]\n\n"
+        ]
+        tool_chunks = [
+            c for c in data_chunks
+            if c["choices"][0]["delta"].get("tool_calls")
+        ]
+        assert len(tool_chunks) == 1
+        tool_call = tool_chunks[0]["choices"][0]["delta"]["tool_calls"][0]
+        assert tool_call["id"] == tid
+        assert tool_call["function"]["name"] == "Read"
+        assert json.loads(tool_call["function"]["arguments"]) == {
+            "file_path": "/etc/hostname"
+        }
+
+        final_chunk = data_chunks[-1]
+        assert final_chunk["choices"][0]["finish_reason"] == "tool_calls"
+        assert final_chunk["usage"]["credits_used"] == 0.06745126666668
+        assert chunks[-1] == "data: [DONE]\n\n"
+
+    @pytest.mark.asyncio
+    async def test_gpt_zero_credit_metering_frame_is_recorded(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Streams a meteringEvent whose usage is exactly 0.
+        Purpose: A zero-credit frame is real metering information; the falsy
+            guard used to drop it, leaving credits_used off the final chunk.
+        """
+        print("Setup: AWS-framed stream with usage=0 metering...")
+        stream = (
+            _aws_event_frame("assistantResponseEvent", {"content": "done"})
+            + _aws_event_frame("meteringEvent", {"inputTokens": 5, "usage": 0, "outputTokens": 2})
+        )
+
+        print("Action: Streaming through the real parser...")
+        mock_response.aiter_bytes = lambda: self._byte_stream(stream, ())
+        chunks = []
+        async for chunk in stream_kiro_to_openai(
+            mock_http_client, mock_response, "gpt-5.6-sol",
+            mock_model_cache, mock_auth_manager
+        ):
+            chunks.append(chunk)
+
+        final_chunk = json.loads(chunks[-2][len("data: "):])
+        print(f"Final chunk usage: {final_chunk['usage']}")
+        assert "credits_used" in final_chunk["usage"]
+        assert final_chunk["usage"]["credits_used"] == 0
+
+    @pytest.mark.asyncio
+    async def test_gpt_stream_without_metering_reports_no_credits(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager
+    ):
+        """
+        What it does: Streams AWS-framed GPT output with no meteringEvent.
+        Purpose: Pin the absent-credit behavior: when upstream sends nothing,
+            the final chunk must NOT fabricate a credits_used field.
+        """
+        print("Setup: AWS-framed stream without metering...")
+        stream = _aws_event_frame("assistantResponseEvent", {"content": "hello"})
+
+        mock_response.aiter_bytes = lambda: self._byte_stream(stream, ())
+        chunks = []
+        async for chunk in stream_kiro_to_openai(
+            mock_http_client, mock_response, "gpt-5.6-sol",
+            mock_model_cache, mock_auth_manager
+        ):
+            chunks.append(chunk)
+
+        final_chunk = json.loads(chunks[-2][len("data: "):])
+        print(f"Final chunk usage: {final_chunk['usage']}")
+        assert "credits_used" not in final_chunk["usage"]

@@ -269,7 +269,7 @@ async def stream_kiro_to_openai_internal(
                 # Collect tool calls from stream (normal tools, not web_search)
                 tool_calls_from_stream.append(event.tool_use)
 
-            elif event.type == "usage" and event.usage:
+            elif event.type == "usage" and event.usage is not None:
                 metering_data = event.usage
                 if request_audit is not None:
                     request_audit.record_metering(event.usage)
@@ -411,7 +411,7 @@ async def stream_kiro_to_openai_internal(
             }
         }
 
-        if metering_data:
+        if metering_data is not None:
             final_chunk["usage"]["credits_used"] = metering_data
 
         # Log final token values being sent to client

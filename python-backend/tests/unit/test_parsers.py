@@ -5,6 +5,10 @@ Unit tests for AwsEventStreamParser and auxiliary parsing functions.
 Tests the parsing logic for AWS SSE stream from Kiro API.
 """
 
+import json
+import struct
+import zlib
+
 import pytest
 
 from kiro.parsers import (
@@ -13,6 +17,31 @@ from kiro.parsers import (
     parse_bracket_tool_calls,
     deduplicate_tool_calls
 )
+
+
+def _aws_string_header(name, value):
+    name_bytes = name.encode()
+    value_bytes = value.encode()
+    return (
+        bytes([len(name_bytes)])
+        + name_bytes
+        + b"\x07"
+        + struct.pack(">H", len(value_bytes))
+        + value_bytes
+    )
+
+
+def _aws_event_frame(event_type, payload):
+    headers = (
+        _aws_string_header(":message-type", "event")
+        + _aws_string_header(":event-type", event_type)
+    )
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    total_length = 16 + len(headers) + len(payload_bytes)
+    prelude_values = struct.pack(">II", total_length, len(headers))
+    prelude = prelude_values + struct.pack(">I", zlib.crc32(prelude_values) & 0xFFFFFFFF)
+    message = prelude + headers + payload_bytes
+    return message + struct.pack(">I", zlib.crc32(message) & 0xFFFFFFFF)
 
 
 class TestFindMatchingBrace:
@@ -593,6 +622,188 @@ class TestAwsEventStreamParserFeed:
         print(f"Result: {events}")
         # Parser should continue working
         assert len(events) == 1
+
+
+class TestAwsEventStreamFrameParsing:
+    """Tests for AWS Event Stream frame-header (prelude + :event-type) parsing."""
+
+    def test_parses_split_aws_frames_by_event_type(self, aws_event_parser):
+        """
+        What it does: Feeds an AWS-framed content frame and metering frame
+            split at awkward byte boundaries.
+        Purpose: Frame decoding must depend on the prelude length, not on how
+            the stream happens to be chunked.
+        """
+        print("Setup: AWS-framed content + metering stream...")
+        content = _aws_event_frame(
+            "assistantResponseEvent",
+            {"content": "Hello from AWS"},
+        )
+        metering = _aws_event_frame(
+            "meteringEvent",
+            {"inputTokens": 12, "usage": 0.06745126666668, "outputTokens": 4},
+        )
+        stream = content + metering
+
+        print("Action: Feeding split at byte boundaries 5 / 19 / mid-second-frame...")
+        events = []
+        previous = 0
+        for boundary in (5, 19, len(content) + 7, len(stream)):
+            events.extend(aws_event_parser.feed(stream[previous:boundary]))
+            previous = boundary
+
+        print(f"Result: {events}")
+        assert events == [
+            {"type": "content", "data": "Hello from AWS"},
+            {"type": "usage", "data": 0.06745126666668},
+        ]
+
+    def test_parses_zero_usage_from_aws_metering_frame(self, aws_event_parser):
+        """
+        What it does: Verifies a metering frame with usage=0 yields a usage event.
+        Purpose: A zero-credit frame is still metering information and must not
+            be dropped (downstream treats missing frames as credits=unavailable).
+        """
+        frame = _aws_event_frame(
+            "meteringEvent",
+            {"inputTokens": 1, "usage": 0, "outputTokens": 1},
+        )
+
+        assert aws_event_parser.feed(frame) == [{"type": "usage", "data": 0}]
+
+    def test_fragmented_tool_input_frames_accumulate(self, aws_event_parser):
+        """
+        What it does: Verifies toolUseEvent input fragments that also carry
+            "name" accumulate into one complete tool call.
+        Purpose: Regression test for the Kiro GPT channel, which streams the
+            tool input as many frames that ALL contain name+toolUseId; the
+            name-first marker dispatch restarted the call per fragment and the
+            client received only the last piece.
+        """
+        print("Setup: start / fragment / stop frames as seen in production...")
+        tid = "call_frag_1"
+        frames = [
+            _aws_event_frame("toolUseEvent", {"name": "Read", "toolUseId": tid}),
+        ]
+        for frag in ['{"', "file", "_path", '":', '"/', "etc", "/", "hostname", '"}']:
+            frames.append(_aws_event_frame(
+                "toolUseEvent", {"input": frag, "name": "Read", "toolUseId": tid},
+            ))
+        frames.append(_aws_event_frame(
+            "toolUseEvent", {"name": "Read", "stop": True, "toolUseId": tid},
+        ))
+
+        print("Action: Feeding frames...")
+        for frame in frames:
+            aws_event_parser.feed(frame)
+
+        calls = aws_event_parser.get_tool_calls()
+        print(f"Result: {calls}")
+        assert len(calls) == 1
+        assert calls[0]["id"] == tid
+        assert calls[0]["function"]["name"] == "Read"
+        assert json.loads(calls[0]["function"]["arguments"]) == {
+            "file_path": "/etc/hostname"
+        }
+
+    def test_second_tool_call_after_fragments_starts_new(self, aws_event_parser):
+        """
+        What it does: Verifies a fragment frame with a different toolUseId
+            starts a new call instead of appending to the previous one.
+        Purpose: Ensure the same-id guard does not merge two distinct calls.
+        """
+        print("Setup: two calls, both arriving as name+input frames...")
+        for frag in ['{"', "command", '":', '"ls', '"}']:
+            aws_event_parser.feed(_aws_event_frame(
+                "toolUseEvent", {"input": frag, "name": "Bash", "toolUseId": "call_a"},
+            ))
+        aws_event_parser.feed(_aws_event_frame(
+            "toolUseEvent", {"name": "Bash", "stop": True, "toolUseId": "call_a"},
+        ))
+        aws_event_parser.feed(_aws_event_frame(
+            "toolUseEvent", {"input": '{"command":"pwd"}', "name": "Bash", "toolUseId": "call_b"},
+        ))
+        aws_event_parser.feed(_aws_event_frame(
+            "toolUseEvent", {"name": "Bash", "stop": True, "toolUseId": "call_b"},
+        ))
+
+        calls = aws_event_parser.get_tool_calls()
+        print(f"Result: {calls}")
+        assert len(calls) == 2
+        assert json.loads(calls[0]["function"]["arguments"]) == {"command": "ls"}
+        assert json.loads(calls[1]["function"]["arguments"]) == {"command": "pwd"}
+
+    def test_aws_text_payload_routes_to_thinking(self, aws_event_parser):
+        """
+        What it does: Verifies an assistantResponseEvent carrying {"text": ...}
+            produces a native thinking event.
+        Purpose: Parity with text mode, where the {"text": marker classifies
+            reasoning frames; AWS mode must not drop them.
+        """
+        print("Setup: AWS-framed reasoning text + signature...")
+        events = aws_event_parser.feed(_aws_event_frame(
+            "assistantResponseEvent", {"text": "reasoning here"},
+        ))
+        events += aws_event_parser.feed(_aws_event_frame(
+            "assistantResponseEvent", {"signature": "sig-abc"},
+        ))
+
+        print(f"Result: {events}")
+        assert events == [
+            {"type": "thinking", "data": "reasoning here", "is_first": True, "is_native": True},
+            {"type": "thinking_signature", "data": "sig-abc"},
+        ]
+
+    def test_unknown_event_type_falls_back_to_payload_keys(self, aws_event_parser):
+        """
+        What it does: Verifies frames with an unrecognized :event-type are
+            still classified by payload keys.
+        Purpose: Anything the legacy text scanner would have caught must not
+            be silently dropped just because the event type is new.
+        """
+        print("Setup: usage + content frames under an unknown event type...")
+        events = aws_event_parser.feed(_aws_event_frame(
+            "someFutureEvent", {"usage": 1.5},
+        ))
+        events += aws_event_parser.feed(_aws_event_frame(
+            "someFutureEvent", {"content": "hi"},
+        ))
+
+        print(f"Result: {events}")
+        assert events == [
+            {"type": "usage", "data": 1.5},
+            {"type": "content", "data": "hi"},
+        ]
+
+    def test_invalid_prelude_drops_buffered_bytes(self, aws_event_parser):
+        """
+        What it does: In AWS mode, feeds a frame with a corrupted prelude CRC,
+            then a valid frame.
+        Purpose: A corrupt prelude must not wedge the parser; buffered bytes
+            are dropped and subsequent feeds still parse.
+        """
+        print("Setup: valid frame, then corrupt prelude, then valid frame...")
+        first = _aws_event_frame("assistantResponseEvent", {"content": "first"})
+        assert aws_event_parser.feed(first) == [{"type": "content", "data": "first"}]
+
+        valid = _aws_event_frame("assistantResponseEvent", {"content": "ok"})
+        corrupt = bytearray(valid)
+        corrupt[11] ^= 0xFF  # break the prelude CRC
+
+        assert aws_event_parser.feed(bytes(corrupt)) == []
+        assert aws_event_parser.feed(valid) == [{"type": "content", "data": "ok"}]
+
+    def test_plain_json_stream_still_uses_text_mode(self, aws_event_parser):
+        """
+        What it does: Feeds unframed JSON (no AWS prelude).
+        Purpose: Non-framed streams must keep working via marker scanning.
+        """
+        events = aws_event_parser.feed(b'{"content":"plain"}{"usage":2.0}')
+
+        assert events == [
+            {"type": "content", "data": "plain"},
+            {"type": "usage", "data": 2.0},
+        ]
 
 
 class TestAwsEventStreamParserToolCalls:
