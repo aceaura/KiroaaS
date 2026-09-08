@@ -34,10 +34,14 @@ from kiro.config import (
     GPT_EDIT_RECOVERY,
     HIDDEN_MODELS,
     MODEL_ALIASES,
-    NATIVE_EFFORT_DEFAULT,
+    NATIVE_EFFORT_DEFAULT_ANTHROPIC,
 )
 from kiro.model_resolver import get_model_id_for_kiro
-from kiro.effort_schema import resolve_first_token_timeout
+from kiro.effort_schema import (
+    detect_effort_level,
+    effort_from_budget,
+    resolve_first_token_timeout,
+)
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
     AnthropicMessage,
@@ -552,11 +556,45 @@ def _thinking_config_from_effort(effort: Optional[str], source: str) -> Optional
     return ThinkingConfig(effort=effort)
 
 
+def _effort_scan_texts(request: AnthropicMessagesRequest) -> List[str]:
+    """Collect system and user-authored text for effort-level detection.
+
+    Tool-result content is excluded: tool output is data, not instruction, and
+    must not inject tier directives.
+    """
+    texts: List[str] = []
+    system_text = extract_system_prompt(request.system)
+    if system_text:
+        texts.append(system_text)
+    for msg in request.messages:
+        if msg.role != "user":
+            continue
+        if isinstance(msg.content, str):
+            texts.append(msg.content)
+        elif isinstance(msg.content, list):
+            for block in msg.content:
+                block_type = (
+                    block.get("type")
+                    if isinstance(block, dict)
+                    else getattr(block, "type", None)
+                )
+                if block_type == "text":
+                    text = (
+                        block.get("text", "")
+                        if isinstance(block, dict)
+                        else getattr(block, "text", "")
+                    )
+                    if text:
+                        texts.append(text)
+    return texts
+
+
 def extract_thinking_config_from_anthropic(request: AnthropicMessagesRequest) -> ThinkingConfig:
     """Resolve Anthropic thinking settings without fabricating adaptive budgets.
 
     Priority is explicit disable, explicit numeric budget, adaptive thinking,
-    output_config.effort, reasoning_effort, then the legacy default path.
+    output_config.effort, reasoning_effort, an effort=N directive in context
+    text, then the legacy default path.
     """
     thinking = request.thinking if isinstance(request.thinking, dict) else None
 
@@ -566,11 +604,13 @@ def extract_thinking_config_from_anthropic(request: AnthropicMessagesRequest) ->
     if thinking is not None:
         raw_budget = thinking.get("budget_tokens")
         if isinstance(raw_budget, int) and not isinstance(raw_budget, bool) and raw_budget > 0:
+            derived_tier = effort_from_budget(raw_budget)
             logger.debug(
                 "Extracted thinking config from Anthropic: "
-                f"source='thinking.budget_tokens', budget={raw_budget}"
+                f"source='thinking.budget_tokens', budget={raw_budget}, "
+                f"derived_tier='{derived_tier}'"
             )
-            return ThinkingConfig(budget_tokens=raw_budget)
+            return ThinkingConfig(budget_tokens=raw_budget, effort=derived_tier)
 
     if thinking is not None and thinking.get("type") == "adaptive":
         effort_config = _thinking_config_from_effort(
@@ -585,6 +625,9 @@ def extract_thinking_config_from_anthropic(request: AnthropicMessagesRequest) ->
         )
         if effort_config is not None:
             return effort_config
+        detected = detect_effort_level(_effort_scan_texts(request))
+        if detected is not None:
+            return ThinkingConfig(effort=detected)
         return ThinkingConfig()
 
     effort_config = _thinking_config_from_effort(
@@ -601,6 +644,10 @@ def extract_thinking_config_from_anthropic(request: AnthropicMessagesRequest) ->
     if effort_config is not None:
         return effort_config
 
+    detected = detect_effort_level(_effort_scan_texts(request))
+    if detected is not None:
+        return ThinkingConfig(effort=detected)
+
     if thinking is not None and thinking.get("type") == "enabled":
         return ThinkingConfig()
 
@@ -614,7 +661,7 @@ def resolve_anthropic_first_token_timeout(request: AnthropicMessagesRequest) -> 
     return resolve_first_token_timeout(
         model_id,
         thinking_config.effort,
-        default_tier=NATIVE_EFFORT_DEFAULT if thinking_config.enabled else None,
+        default_tier=NATIVE_EFFORT_DEFAULT_ANTHROPIC if thinking_config.enabled else None,
     )
 
 
@@ -703,6 +750,7 @@ async def anthropic_to_kiro(
         profile_arn=profile_arn,
         thinking_config=thinking_config,
         native_thinking=native_thinking,
+        default_effort=NATIVE_EFFORT_DEFAULT_ANTHROPIC,
         request_audit=request_audit,
         budget=image_budget,
     )

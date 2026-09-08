@@ -541,18 +541,57 @@ EFFORT_FALLBACK: str = "medium"
 # OpenAI-only effort values mapped to the nearest canonical tier.
 OPENAI_EFFORT_ALIASES: Dict[str, str] = {"minimal": "low"}
 
+# Anthropic numeric thinking budgets (thinking.budget_tokens) approximated as
+# tiers for native-effort models, whose channel accepts no numeric budget.
+# Budgets below each bound adopt that tier; at/above the last bound adopt "max".
+# Bounds anchor to common client presets (~4k "think", ~10k "think hard",
+# ~32k "ultrathink").
+BUDGET_TIER_THRESHOLDS: Tuple[Tuple[int, str], ...] = (
+    (2048, "low"),
+    (8192, "medium"),
+    (16384, "high"),
+    (32768, "xhigh"),
+)
+
 _NATIVE_EFFORT_RAW: str = os.getenv("NATIVE_EFFORT", "").lower()
 NATIVE_EFFORT_ENABLED: bool = _NATIVE_EFFORT_RAW not in ("false", "0", "no", "disabled", "off")
 
-# Default tier sent to schema-capable models when the client did not request
-# one. Keeps reasoning deterministic across clients instead of depending on
-# each model's server-side default. Set to empty/off to omit the field for
-# silent clients (the pre-default behavior).
-_NATIVE_EFFORT_DEFAULT_RAW: str = os.getenv("NATIVE_EFFORT_DEFAULT", "medium").strip().lower()
-NATIVE_EFFORT_DEFAULT: Optional[str] = (
-    None
-    if _NATIVE_EFFORT_DEFAULT_RAW in ("", "off", "disabled", "false", "0")
-    else _NATIVE_EFFORT_DEFAULT_RAW
+# Numeric effort levels usable in prompt text ("effort=3"), mapped to tiers.
+EFFORT_LEVEL_TIERS: Dict[int, str] = {
+    1: "low",
+    2: "medium",
+    3: "high",
+    4: "xhigh",
+    5: "max",
+}
+
+
+def _parse_effort_default(raw: Optional[str], fallback: Optional[str]) -> Optional[str]:
+    """Parse an effort-default env var; empty/off disables, unset keeps fallback."""
+    if raw is None:
+        return fallback
+    raw = raw.strip().lower()
+    if raw in ("", "off", "disabled", "false", "0"):
+        return None
+    return raw
+
+
+# Default tier sent to schema-capable models when neither the request nor the
+# context specifies one. Keeps reasoning deterministic across clients instead
+# of depending on each model's server-side default. NATIVE_EFFORT_DEFAULT is a
+# legacy shared override: when explicitly set it wins over both per-protocol
+# defaults; set any of them to empty/off to omit the field for silent clients.
+_LEGACY_EFFORT_DEFAULT_UNSET = os.getenv("NATIVE_EFFORT_DEFAULT") is None
+NATIVE_EFFORT_DEFAULT: Optional[str] = _parse_effort_default(
+    os.getenv("NATIVE_EFFORT_DEFAULT"), None
+)
+NATIVE_EFFORT_DEFAULT_OPENAI: Optional[str] = _parse_effort_default(
+    os.getenv("NATIVE_EFFORT_DEFAULT_OPENAI"),
+    "xhigh" if _LEGACY_EFFORT_DEFAULT_UNSET else NATIVE_EFFORT_DEFAULT,
+)
+NATIVE_EFFORT_DEFAULT_ANTHROPIC: Optional[str] = _parse_effort_default(
+    os.getenv("NATIVE_EFFORT_DEFAULT_ANTHROPIC"),
+    "medium" if _LEGACY_EFFORT_DEFAULT_UNSET else NATIVE_EFFORT_DEFAULT,
 )
 
 _NATIVE_EFFORT_SUPPRESS_TAGS_RAW: str = os.getenv("NATIVE_EFFORT_SUPPRESS_TAGS", "").lower()

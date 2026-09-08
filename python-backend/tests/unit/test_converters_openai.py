@@ -1862,9 +1862,9 @@ class TestBuildKiroPayloadIntegration:
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
 
-    async def test_silent_client_gets_default_medium(self, monkeypatch):
+    async def test_silent_client_gets_default_xhigh(self, monkeypatch):
         """
-        What it does: Verifies a request without effort gets the default tier
+        What it does: Verifies a request without effort gets the OpenAI default tier
         Purpose: Silent clients on schema models receive deterministic native effort
         """
         print("Setting up mocks...")
@@ -1885,7 +1885,7 @@ class TestBuildKiroPayloadIntegration:
 
         print("Checking default native effort was applied...")
         assert payload["additionalModelRequestFields"] == {
-            "reasoning": {"effort": "medium"}
+            "reasoning": {"effort": "xhigh"}
         }
 
         print("Checking legacy thinking tags were suppressed...")
@@ -1893,6 +1893,59 @@ class TestBuildKiroPayloadIntegration:
         assert "<thinking_mode>" not in content
         assert "<thinking_effort>" not in content
         assert "<max_thinking_length>" not in content
+
+    async def test_context_effort_directive_overrides_default(self, monkeypatch):
+        """
+        What it does: Verifies effort=N in message text beats the protocol default
+        Purpose: Silent clients can steer the tier from context without API params
+        """
+        print("Setting up mocks...")
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+
+        print("Creating request with 'effort=1' in the user message...")
+        request = ChatCompletionRequest(
+            model="gpt-5.5",
+            messages=[ChatMessage(role="user", content="Summarize this. effort=1")],
+        )
+
+        print("Calling build_kiro_payload...")
+        payload = await build_kiro_payload(
+            request_data=request,
+            conversation_id="test-conv-123",
+            profile_arn="arn:aws:test"
+        )
+
+        print("Checking the detected tier was applied...")
+        assert payload["additionalModelRequestFields"] == {
+            "reasoning": {"effort": "low"}
+        }
+
+    async def test_explicit_reasoning_effort_beats_context_directive(self, monkeypatch):
+        """
+        What it does: Verifies an API-level reasoning_effort beats effort=N text
+        Purpose: Explicit parameters must never be overridden by prompt content
+        """
+        print("Setting up mocks...")
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+
+        print("Creating request with reasoning_effort='high' and 'effort=1' text...")
+        request = ChatCompletionRequest(
+            model="gpt-5.5",
+            messages=[ChatMessage(role="user", content="effort=1 please")],
+            reasoning_effort="high",
+        )
+
+        print("Calling build_kiro_payload...")
+        payload = await build_kiro_payload(
+            request_data=request,
+            conversation_id="test-conv-123",
+            profile_arn="arn:aws:test"
+        )
+
+        print("Checking the explicit effort was applied...")
+        assert payload["additionalModelRequestFields"] == {
+            "reasoning": {"effort": "high"}
+        }
 
     async def test_silent_client_unsupported_model_keeps_legacy_tags(self, monkeypatch):
         """

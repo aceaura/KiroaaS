@@ -4389,6 +4389,26 @@ class TestInjectThinkingTags:
     This function injects thinking mode tags into content when FAKE_REASONING_ENABLED is True.
     """
     
+    def test_numeric_budget_takes_precedence_over_derived_effort(self):
+        """
+        What it does: Verifies budget_tokens wins when both budget and effort are set
+        Purpose: Anthropic budget requests derive a tier for native models, but the
+        exact number is more precise and must reach non-native models unchanged
+        """
+        print("Setup: ThinkingConfig with budget_tokens=8000 and derived effort='medium'...")
+        content = "Test"
+
+        print("Action: Inject thinking tags...")
+        with patch('kiro.converters_core.FAKE_REASONING_ENABLED', True):
+            with patch('kiro.converters_core.FAKE_REASONING_BUDGET_CAP', 0):
+                result = inject_thinking_tags(
+                    content, ThinkingConfig(budget_tokens=8000, effort="medium")
+                )
+
+        print("Checking that the numeric tag is used and the effort tag is not...")
+        assert "<max_thinking_length>8000</max_thinking_length>" in result
+        assert "<thinking_effort>" not in result
+
     def test_returns_original_content_when_disabled(self):
         """
         What it does: Verifies that content is returned unchanged when fake reasoning is disabled.

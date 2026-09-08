@@ -49,7 +49,6 @@ from kiro.config import (
     KIRO_MAX_PAYLOAD_BYTES,
     AUTO_TRIM_PAYLOAD,
     NATIVE_EFFORT_ENABLED,
-    NATIVE_EFFORT_DEFAULT,
     NATIVE_EFFORT_NONE_ON_DISABLED,
     NATIVE_EFFORT_SUPPRESS_TAGS,
     FETCH_IMAGE_URLS,
@@ -753,8 +752,9 @@ def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
     """
     Inject reasoning-control tags into content based on configuration.
 
-    Qualitative effort is preserved verbatim. Explicit and default numeric
-    budgets remain on the legacy max_thinking_length path.
+    Qualitative effort is preserved verbatim. Explicit numeric budgets stay
+    on the max_thinking_length path and take precedence over the tier derived
+    from them, since the number is more precise than its tier approximation.
     """
     if not FAKE_REASONING_ENABLED:
         return content
@@ -775,16 +775,9 @@ def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
         "Take the time you need. Quality of thought matters more than speed."
     )
 
-    if thinking_config.effort is not None:
-        control_tag = f"<thinking_effort>{thinking_config.effort}</thinking_effort>"
-        logger.debug(f"Injecting thinking tags with effort='{thinking_config.effort}'")
-    else:
-        if thinking_config.budget_tokens is not None:
-            effective_budget = thinking_config.budget_tokens
-            budget_source = "explicit"
-        else:
-            effective_budget = FAKE_REASONING_MAX_TOKENS
-            budget_source = "default"
+    if thinking_config.budget_tokens is not None:
+        effective_budget = thinking_config.budget_tokens
+        budget_source = "explicit"
 
         if FAKE_REASONING_BUDGET_CAP > 0 and effective_budget > FAKE_REASONING_BUDGET_CAP:
             logger.warning(
@@ -796,6 +789,20 @@ def inject_thinking_tags(content: str, thinking_config: ThinkingConfig) -> str:
 
         control_tag = f"<max_thinking_length>{effective_budget}</max_thinking_length>"
         logger.debug(f"Injecting thinking tags with {budget_source} budget={effective_budget}")
+    elif thinking_config.effort is not None:
+        control_tag = f"<thinking_effort>{thinking_config.effort}</thinking_effort>"
+        logger.debug(f"Injecting thinking tags with effort='{thinking_config.effort}'")
+    else:
+        effective_budget = FAKE_REASONING_MAX_TOKENS
+        if FAKE_REASONING_BUDGET_CAP > 0 and effective_budget > FAKE_REASONING_BUDGET_CAP:
+            logger.warning(
+                f"Thinking budget {effective_budget} (default) exceeds cap {FAKE_REASONING_BUDGET_CAP}. "
+                f"Using capped value {FAKE_REASONING_BUDGET_CAP}. "
+                f"Set FAKE_REASONING_BUDGET_CAP=0 to disable capping."
+            )
+            effective_budget = FAKE_REASONING_BUDGET_CAP
+        control_tag = f"<max_thinking_length>{effective_budget}</max_thinking_length>"
+        logger.debug(f"Injecting thinking tags with default budget={effective_budget}")
 
     thinking_prefix = (
         "<thinking_mode>enabled</thinking_mode>\n"
@@ -1929,15 +1936,16 @@ async def build_kiro_payload(
     profile_arn: str,
     thinking_config: ThinkingConfig,
     native_thinking: Optional[Dict[str, Any]] = None,
+    default_effort: Optional[str] = None,
     request_audit: Optional[RequestAudit] = None,
     budget: Optional["ImageFetchBudget"] = None,
 ) -> KiroPayloadResult:
     """
     Builds complete payload for Kiro API from unified data.
-    
+
     This is the main function that assembles the Kiro API payload from
     API-agnostic unified message and tool formats.
-    
+
     Args:
         messages: List of messages in unified format (without system messages)
         system_prompt: Already extracted system prompt
@@ -1947,6 +1955,7 @@ async def build_kiro_payload(
         profile_arn: AWS CodeWhisperer profile ARN
         thinking_config: Thinking configuration from API adapter
         native_thinking: Anthropic adaptive thinking dictionary to forward verbatim
+        default_effort: Tier applied for silent clients; differs per protocol
         request_audit: Optional request audit state shared with the response stream
         budget: Shared ImageFetchBudget covering both history and the current
             message, so one request cannot exceed the URL fetch cap and repeated
@@ -1979,7 +1988,6 @@ async def build_kiro_payload(
         default_effort = None
     else:
         requested_effort = thinking_config.effort
-        default_effort = NATIVE_EFFORT_DEFAULT
     effort_decision = resolve_effort_decision(
         model_id, requested_effort, default_tier=default_effort
     )

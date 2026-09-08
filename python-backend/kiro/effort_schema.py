@@ -11,15 +11,18 @@
 
 """Resolve client effort tiers into Kiro's native additionalModelRequestFields."""
 
+import re
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 from loguru import logger
 
 from kiro.config import (
+    BUDGET_TIER_THRESHOLDS,
     EFFORT_FALLBACK,
     EFFORT_FIRST_TOKEN_TIMEOUT_CAP,
     EFFORT_FIRST_TOKEN_TIMEOUT_MULTIPLIERS,
+    EFFORT_LEVEL_TIERS,
     EFFORT_ORDER,
     FIRST_TOKEN_TIMEOUT,
     MODEL_EFFORT_SCHEMA,
@@ -77,6 +80,40 @@ def clamp_effort(requested: str, allowed: Tuple[str, ...]) -> Optional[str]:
         return max(lower, key=EFFORT_ORDER.index)
 
     return min(candidates, key=EFFORT_ORDER.index)
+
+
+def effort_from_budget(budget_tokens: int) -> str:
+    """Approximate a numeric Anthropic thinking budget as a canonical tier.
+
+    Kiro's native channel accepts no numeric budget, so clients that send
+    thinking.budget_tokens get the nearest qualitative tier instead. The
+    exact number still reaches non-native models via the reasoning-tag path.
+    """
+    for bound, tier in BUDGET_TIER_THRESHOLDS:
+        if budget_tokens < bound:
+            return tier
+    return "max"
+
+
+# In-prompt tier selector ("effort=3"), matched case-insensitively.
+EFFORT_LEVEL_PATTERN = re.compile(r"\beffort\s*=\s*([1-5])\b", re.IGNORECASE)
+
+
+def detect_effort_level(texts: Iterable[str]) -> Optional[str]:
+    """Map the last effort=<1-5> found in context text to a canonical tier.
+
+    Later occurrences win so a client can revise the level mid-conversation.
+    Returns None when no directive is present.
+    """
+    tier = None
+    for text in texts:
+        if not text:
+            continue
+        for match in EFFORT_LEVEL_PATTERN.finditer(text):
+            tier = EFFORT_LEVEL_TIERS[int(match.group(1))]
+    if tier is not None:
+        logger.info(f"Detected effort level in context: adopted tier='{tier}'")
+    return tier
 
 
 def resolve_effort_decision(

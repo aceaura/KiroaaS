@@ -38,11 +38,11 @@ from kiro.config import (
     EFFORT_ORDER,
     HIDDEN_MODELS,
     MODEL_ALIASES,
-    NATIVE_EFFORT_DEFAULT,
+    NATIVE_EFFORT_DEFAULT_OPENAI,
     OPENAI_EFFORT_ALIASES,
 )
 from kiro.model_resolver import get_model_id_for_kiro
-from kiro.effort_schema import resolve_first_token_timeout
+from kiro.effort_schema import detect_effort_level, resolve_first_token_timeout
 from kiro.models_openai import ChatMessage, ChatCompletionRequest, Tool
 
 # Import from core - reuse shared logic
@@ -331,14 +331,50 @@ def resolve_openai_tool_choice(
 # Thinking Configuration Extraction
 # ==================================================================================================
 
+def _effort_scan_texts(request: ChatCompletionRequest) -> List[str]:
+    """Collect system and user-authored text for effort-level detection.
+
+    Assistant and tool messages are excluded: prior model output and tool
+    results are data, not instruction, and must not inject tier directives.
+    """
+    texts: List[str] = []
+    for msg in request.messages:
+        if msg.role not in ("system", "developer", "user"):
+            continue
+        content = msg.content
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                part_type = (
+                    part.get("type")
+                    if isinstance(part, dict)
+                    else getattr(part, "type", None)
+                )
+                if part_type == "text":
+                    text = (
+                        part.get("text", "")
+                        if isinstance(part, dict)
+                        else getattr(part, "text", "")
+                    )
+                    if text:
+                        texts.append(text)
+    return texts
+
+
 def extract_thinking_config_from_openai(request: ChatCompletionRequest) -> ThinkingConfig:
     """Resolve OpenAI reasoning effort into the unified thinking model.
 
     Canonical tiers are preserved verbatim; OpenAI aliases are mapped first and
-    unknown values fall back to the schema-safe default.
+    unknown values fall back to the schema-safe default. When the request is
+    silent, an effort=N directive in context text wins over the protocol
+    default.
     """
     effort = request.reasoning_effort
     if not effort:
+        detected = detect_effort_level(_effort_scan_texts(request))
+        if detected is not None:
+            return ThinkingConfig(effort=detected)
         return ThinkingConfig()
 
     if not isinstance(effort, str):
@@ -374,7 +410,7 @@ def resolve_openai_first_token_timeout(request: ChatCompletionRequest) -> float:
     return resolve_first_token_timeout(
         model_id,
         thinking_config.effort,
-        default_tier=NATIVE_EFFORT_DEFAULT if thinking_config.enabled else None,
+        default_tier=NATIVE_EFFORT_DEFAULT_OPENAI if thinking_config.enabled else None,
     )
 
 
@@ -446,6 +482,7 @@ async def build_kiro_payload(
         conversation_id=conversation_id,
         profile_arn=profile_arn,
         thinking_config=thinking_config,
+        default_effort=NATIVE_EFFORT_DEFAULT_OPENAI,
         request_audit=request_audit,
         budget=image_budget,
     )

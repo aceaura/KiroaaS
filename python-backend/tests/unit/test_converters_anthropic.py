@@ -1794,9 +1794,51 @@ class TestExtractThinkingConfigFromAnthropic:
         print("Extracting thinking config...")
         config = extract_thinking_config_from_anthropic(request)
 
-        print(f"Comparing: enabled={config.enabled}, budget_tokens={config.budget_tokens}")
+        print(f"Comparing: enabled={config.enabled}, budget_tokens={config.budget_tokens}, effort={config.effort}")
         assert config.enabled is True
         assert config.budget_tokens == 8000
+        # Native models cannot carry the number, so a tier is derived alongside.
+        assert config.effort == "medium"
+
+    def test_thinking_enabled_with_large_budget_derives_max(self):
+        """
+        What it does: Verifies a large budget_tokens derives the 'max' tier
+        Purpose: Ensure native-effort models receive the top tier for large budgets
+        """
+        print("Creating request with thinking={'type': 'enabled', 'budget_tokens': 40000}...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "enabled", "budget_tokens": 40000}
+        )
+
+        print("Extracting thinking config...")
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: budget_tokens={config.budget_tokens}, effort={config.effort}")
+        assert config.budget_tokens == 40000
+        assert config.effort == "max"
+
+    def test_thinking_enabled_with_tiny_budget_derives_low(self):
+        """
+        What it does: Verifies the minimum official budget derives the 'low' tier
+        Purpose: Small budgets must not inflate into expensive tiers
+        """
+        print("Creating request with thinking={'type': 'enabled', 'budget_tokens': 1024}...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "enabled", "budget_tokens": 1024}
+        )
+
+        print("Extracting thinking config...")
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: budget_tokens={config.budget_tokens}, effort={config.effort}")
+        assert config.budget_tokens == 1024
+        assert config.effort == "low"
 
     def test_thinking_enabled_without_budget(self):
         """
@@ -1984,6 +2026,140 @@ class TestExtractThinkingConfigFromAnthropic:
         assert config.enabled is True
         assert config.effort == "medium"
 
+    def test_context_directive_detected_in_user_text(self):
+        """
+        What it does: Verifies effort=4 in user text maps to 'xhigh'
+        Purpose: Silent clients can steer the tier from context
+        """
+        print("Creating request with 'effort=4' in user text...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="Refactor this. effort=4")],
+            max_tokens=1024,
+        )
+
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: effort={config.effort}")
+        assert config.effort == "xhigh"
+
+    def test_context_directive_detected_in_system_prompt(self):
+        """
+        What it does: Verifies effort=2 in the system prompt maps to 'medium'
+        Purpose: System-level directives are part of the scanned context
+        """
+        print("Creating request with 'effort=2' in system prompt...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            system="You are thorough. effort=2",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+        )
+
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: effort={config.effort}")
+        assert config.effort == "medium"
+
+    def test_context_directive_last_occurrence_wins(self):
+        """
+        What it does: Verifies a later effort=N overrides an earlier one
+        Purpose: Clients can revise the level mid-conversation
+        """
+        print("Creating request with effort=1 then effort=4...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[
+                AnthropicMessage(role="user", content="effort=1 quick pass"),
+                AnthropicMessage(role="assistant", content="Done."),
+                AnthropicMessage(role="user", content="Now deeper. effort=4"),
+            ],
+            max_tokens=1024,
+        )
+
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: effort={config.effort}")
+        assert config.effort == "xhigh"
+
+    def test_context_directive_ignores_tool_results_and_assistant(self):
+        """
+        What it does: Verifies effort=N inside tool results or assistant text is ignored
+        Purpose: Tool output and prior model text are data, not instructions
+        """
+        print("Creating request with effort=5 only in a tool_result and assistant text...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[
+                AnthropicMessage(role="assistant", content="Setting effort=5 now"),
+                AnthropicMessage(
+                    role="user",
+                    content=[{"type": "tool_result", "tool_use_id": "t1", "content": "effort=5"}],
+                ),
+            ],
+            max_tokens=1024,
+        )
+
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: effort={config.effort}")
+        assert config.effort is None
+
+    def test_context_directive_never_overrides_explicit_disable(self):
+        """
+        What it does: Verifies thinking=disabled wins over effort=5 in text
+        Purpose: An explicit disable must never be overridden by prompt content
+        """
+        print("Creating disabled request with 'effort=5' in user text...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="effort=5")],
+            max_tokens=1024,
+            thinking={"type": "disabled"},
+        )
+
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: enabled={config.enabled}")
+        assert config.enabled is False
+
+    def test_context_directive_loses_to_explicit_effort(self):
+        """
+        What it does: Verifies output_config.effort beats effort=1 in text
+        Purpose: Explicit API parameters outrank prompt directives
+        """
+        print("Creating request with output_config.effort='high' and 'effort=1' text...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="effort=1")],
+            max_tokens=1024,
+            output_config={"effort": "high"},
+        )
+
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: effort={config.effort}")
+        assert config.effort == "high"
+
+    def test_context_directive_loses_to_numeric_budget(self):
+        """
+        What it does: Verifies budget_tokens derivation beats effort=5 in text
+        Purpose: An explicit numeric budget is a stronger signal than prompt text
+        """
+        print("Creating request with budget_tokens=1024 and 'effort=5' text...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="effort=5")],
+            max_tokens=1024,
+            thinking={"type": "enabled", "budget_tokens": 1024},
+        )
+
+        config = extract_thinking_config_from_anthropic(request)
+
+        print(f"Comparing: budget={config.budget_tokens}, effort={config.effort}")
+        assert config.budget_tokens == 1024
+        assert config.effort == "low"
+
 
 
 class TestAnthropicToKiroIntegration:
@@ -2014,6 +2190,27 @@ class TestAnthropicToKiroIntegration:
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
         assert "<max_thinking_length>" not in content
+
+    async def test_context_directive_reaches_native_field(self):
+        """
+        What it does: Verifies effort=5 in user text produces the max native fragment
+        Purpose: The context directive must flow end-to-end into the Kiro payload
+        """
+        print("Creating request with 'effort=5' for claude-opus-5...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="Deep analysis. effort=5")],
+            max_tokens=1024,
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = await anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+
+        print("Checking the detected tier was applied...")
+        assert payload["additionalModelRequestFields"] == {
+            "output_config": {"effort": "max"},
+        }
 
     async def test_silent_client_unsupported_model_keeps_legacy_tags(self):
         """

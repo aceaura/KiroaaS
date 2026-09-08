@@ -11,6 +11,8 @@ Tests for native effort tier resolution:
 from kiro.config import EFFORT_FALLBACK, MODEL_EFFORT_SCHEMA
 from kiro.effort_schema import (
     clamp_effort,
+    detect_effort_level,
+    effort_from_budget,
     lookup_effort_schema,
     resolve_effort_decision,
     resolve_first_token_timeout,
@@ -474,3 +476,141 @@ class TestResolveFirstTokenTimeout:
 
         print(f"Comparing: expected=45.0, got={timeout}")
         assert timeout == 45.0
+
+
+class TestEffortFromBudget:
+    """Tests for effort_from_budget tier approximation."""
+
+    def test_minimum_anthropic_budget_maps_low(self):
+        """
+        What it does: Verifies 1024 (the official minimum budget) maps to 'low'
+        Purpose: Small budgets must not inflate into expensive tiers
+        """
+        print("Mapping budget 1024...")
+        assert effort_from_budget(1024) == "low"
+
+    def test_just_below_medium_bound_maps_low(self):
+        """
+        What it does: Verifies 2047 maps to 'low'
+        Purpose: Boundary is exclusive on the lower tier
+        """
+        print("Mapping budget 2047...")
+        assert effort_from_budget(2047) == "low"
+
+    def test_medium_bound_maps_medium(self):
+        """
+        What it does: Verifies 2048 maps to 'medium'
+        Purpose: Boundary is inclusive on the upper tier
+        """
+        print("Mapping budget 2048...")
+        assert effort_from_budget(2048) == "medium"
+
+    def test_think_preset_maps_medium(self):
+        """
+        What it does: Verifies ~4k 'think' preset maps to 'medium'
+        Purpose: Common client presets should land mid-scale
+        """
+        print("Mapping budget 4000...")
+        assert effort_from_budget(4000) == "medium"
+
+    def test_think_hard_preset_maps_high(self):
+        """
+        What it does: Verifies ~10k 'think hard' preset maps to 'high'
+        Purpose: Larger presets adopt proportionally higher tiers
+        """
+        print("Mapping budget 10000...")
+        assert effort_from_budget(10000) == "high"
+
+    def test_between_high_and_xhigh_maps_xhigh(self):
+        """
+        What it does: Verifies 16384 maps to 'xhigh'
+        Purpose: Boundary is inclusive on the upper tier
+        """
+        print("Mapping budget 16384...")
+        assert effort_from_budget(16384) == "xhigh"
+
+    def test_ultrathink_preset_maps_max(self):
+        """
+        What it does: Verifies ~32k 'ultrathink' preset maps to 'max'
+        Purpose: The largest common preset adopts the top tier
+        """
+        print("Mapping budget 32768...")
+        assert effort_from_budget(32768) == "max"
+
+    def test_oversized_budget_maps_max(self):
+        """
+        What it does: Verifies budgets above every bound map to 'max'
+        Purpose: The mapping saturates instead of overflowing
+        """
+        print("Mapping budget 200000...")
+        assert effort_from_budget(200000) == "max"
+
+
+class TestDetectEffortLevel:
+    """Tests for detect_effort_level context scanning."""
+
+    def test_detects_plain_directive(self):
+        """
+        What it does: Verifies 'effort=3' maps to 'high'
+        Purpose: The basic in-context directive form must be recognized
+        """
+        print("Scanning 'effort=3'...")
+        assert detect_effort_level(["do it, effort=3"]) == "high"
+
+    def test_case_insensitive_with_spaces(self):
+        """
+        What it does: Verifies 'Effort = 5' maps to 'max'
+        Purpose: Case and spacing around '=' must not matter
+        """
+        print("Scanning 'Effort = 5'...")
+        assert detect_effort_level(["EFFORT = 5"]) == "max"
+
+    def test_all_levels_map_in_order(self):
+        """
+        What it does: Verifies levels 1-5 map low/medium/high/xhigh/max
+        Purpose: The full level scale must be usable
+        """
+        print("Scanning every level...")
+        expected = ["low", "medium", "high", "xhigh", "max"]
+        for level, tier in enumerate(expected, start=1):
+            assert detect_effort_level([f"effort={level}"]) == tier
+
+    def test_last_match_wins_across_texts(self):
+        """
+        What it does: Verifies a later directive overrides an earlier one
+        Purpose: Clients can revise the level mid-conversation
+        """
+        print("Scanning effort=1 then effort=4...")
+        assert detect_effort_level(["effort=1", "effort=4"]) == "xhigh"
+
+    def test_no_match_returns_none(self):
+        """
+        What it does: Verifies plain text yields None
+        Purpose: Absence of a directive must fall through to defaults
+        """
+        print("Scanning plain text...")
+        assert detect_effort_level(["hello world"]) is None
+
+    def test_out_of_range_levels_ignored(self):
+        """
+        What it does: Verifies effort=0 and effort=9 are not directives
+        Purpose: Only 1-5 are valid levels
+        """
+        print("Scanning effort=0 and effort=9...")
+        assert detect_effort_level(["effort=0", "effort=9"]) is None
+
+    def test_embedded_word_not_matched(self):
+        """
+        What it does: Verifies 'antieffort=3' is not a directive
+        Purpose: Word boundaries prevent false positives inside other words
+        """
+        print("Scanning 'antieffort=3'...")
+        assert detect_effort_level(["antieffort=3"]) is None
+
+    def test_empty_and_none_texts_skipped(self):
+        """
+        What it does: Verifies empty strings in the input are tolerated
+        Purpose: Sparse content blocks must not break scanning
+        """
+        print("Scanning empty strings...")
+        assert detect_effort_level(["", ""]) is None
