@@ -43,7 +43,7 @@ from kiro.parsers import AwsEventStreamParser, parse_bracket_tool_calls, dedupli
 from kiro.request_audit import RequestAudit
 from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
-    FIRST_TOKEN_MAX_RETRIES,
+    FIRST_TOKEN_WATCHDOG_ATTEMPTS,
     FAKE_REASONING_ENABLED,
     FAKE_REASONING_HANDLING,
 )
@@ -550,7 +550,7 @@ async def stream_with_first_token_retry(
     make_request: Callable[[], Awaitable[httpx.Response]],
     stream_processor: Callable[[httpx.Response], AsyncGenerator[str, None]],
     initial_response: Optional[httpx.Response] = None,
-    max_retries: int = FIRST_TOKEN_MAX_RETRIES,
+    max_retries: int = FIRST_TOKEN_WATCHDOG_ATTEMPTS,
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     on_http_error: Optional[Callable[[int, str], Exception]] = None,
     on_all_retries_failed: Optional[Callable[[int, float], Exception]] = None,

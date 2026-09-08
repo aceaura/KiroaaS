@@ -1882,7 +1882,7 @@ class TestExtractThinkingConfigFromAnthropic:
 
     def test_adaptive_high_effort_extends_first_token_timeout(self):
         """
-        What it does: Verifies adaptive high effort uses a 60s first-byte wait
+        What it does: Verifies adaptive high effort extends the first-byte wait
         Purpose: Prevent modern Claude reasoning requests from premature retries
         """
         print("Creating adaptive thinking request for claude-opus-5...")
@@ -1897,8 +1897,10 @@ class TestExtractThinkingConfigFromAnthropic:
         print("Resolving first-token timeout...")
         timeout = resolve_anthropic_first_token_timeout(request)
 
-        print(f"Comparing: expected=60.0, got={timeout}")
-        assert timeout == 60.0
+        # 120s base * 4.0 (high) exceeds the cap, so the wait lands on the cap.
+        print(f"Comparing: expected=280.0, got={timeout}")
+        assert timeout == 280.0
+        assert timeout != 120.0, "effort tier was ignored; timeout stayed at the base value"
 
     def test_thinking_adaptive_with_reasoning_effort(self):
         """

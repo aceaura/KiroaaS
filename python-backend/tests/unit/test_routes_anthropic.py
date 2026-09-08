@@ -81,7 +81,7 @@ class TestStrictStreamingBuffering:
             response = await messages(request, request_data)
 
         assert response.status_code == 502
-        assert collect_mock.await_args.kwargs["first_token_timeout"] == 60.0
+        assert collect_mock.await_args.kwargs["first_token_timeout"] == 280.0
         assert json.loads(response.body)["error"]["type"] == "tool_choice_not_satisfied"
         stream_encoder.assert_not_called()
 

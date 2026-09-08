@@ -268,8 +268,8 @@ class TestResolveFirstTokenTimeout:
         print("Resolving timeout without effort...")
         timeout = resolve_first_token_timeout("gpt-5.6-sol", None)
 
-        print(f"Comparing: expected=15.0, got={timeout}")
-        assert timeout == 15.0
+        print(f"Comparing: expected=120.0, got={timeout}")
+        assert timeout == 120.0
 
     def test_none_uses_base_timeout(self):
         """
@@ -279,8 +279,8 @@ class TestResolveFirstTokenTimeout:
         print("Resolving timeout for effort='none'...")
         timeout = resolve_first_token_timeout("gpt-5.6-sol", "none")
 
-        print(f"Comparing: expected=15.0, got={timeout}")
-        assert timeout == 15.0
+        print(f"Comparing: expected=120.0, got={timeout}")
+        assert timeout == 120.0
 
     def test_high_effort_extends_timeout(self):
         """
@@ -290,19 +290,29 @@ class TestResolveFirstTokenTimeout:
         print("Resolving timeout for effort='high'...")
         timeout = resolve_first_token_timeout("gpt-5.6-sol", "high")
 
-        print(f"Comparing: expected=60.0, got={timeout}")
-        assert timeout == 60.0
+        # 120 * 4.0 exceeds the cap, so the wait lands on the cap itself.
+        print(f"Comparing: expected=280.0, got={timeout}")
+        assert timeout == 280.0
 
-    def test_clamped_xhigh_uses_adopted_tier_timeout(self):
+    def test_clamped_xhigh_uses_adopted_tier_timeout(self, monkeypatch):
         """
         What it does: Verifies Sonnet 4.6 xhigh uses the clamped high timeout
         Purpose: Match the actual effort sent to Kiro instead of the request
+
+        The base timeout and cap are pinned here so the adopted tier stays
+        distinguishable from the requested one. Under the production defaults
+        both multipliers exceed the cap and collapse to the same value, which
+        would satisfy this assertion even if clamping were ignored.
         """
+        monkeypatch.setattr("kiro.effort_schema.FIRST_TOKEN_TIMEOUT", 15.0)
+        monkeypatch.setattr("kiro.effort_schema.EFFORT_FIRST_TOKEN_TIMEOUT_CAP", 0.0)
+
         print("Resolving timeout for clamped xhigh on claude-sonnet-4.6...")
         timeout = resolve_first_token_timeout("claude-sonnet-4.6", "xhigh")
 
-        print(f"Comparing: expected=60.0, got={timeout}")
+        print(f"Comparing: expected=60.0 (adopted 'high' 4.0x), got={timeout}")
         assert timeout == 60.0
+        assert timeout != 90.0, "timeout followed requested 'xhigh' instead of adopted 'high'"
 
     def test_unsupported_model_still_uses_requested_tier(self):
         """
@@ -312,8 +322,8 @@ class TestResolveFirstTokenTimeout:
         print("Resolving timeout for xhigh on unsupported claude-sonnet-4.5...")
         timeout = resolve_first_token_timeout("claude-sonnet-4.5", "xhigh")
 
-        print(f"Comparing: expected=90.0, got={timeout}")
-        assert timeout == 90.0
+        print(f"Comparing: expected=280.0, got={timeout}")
+        assert timeout == 280.0
 
     def test_unknown_tier_uses_medium_timeout(self):
         """
@@ -323,8 +333,8 @@ class TestResolveFirstTokenTimeout:
         print("Resolving timeout for unknown effort='ultra'...")
         timeout = resolve_first_token_timeout("gpt-5.6-sol", "ultra")
 
-        print(f"Comparing: expected=30.0, got={timeout}")
-        assert timeout == 30.0
+        print(f"Comparing: expected=240.0, got={timeout}")
+        assert timeout == 240.0
 
     def test_cap_limits_scaled_timeout(self, monkeypatch):
         """

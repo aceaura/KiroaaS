@@ -51,7 +51,7 @@ from kiro.streaming_core import (
 from kiro.tokenizer import count_tokens, estimate_request_tokens
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
 from kiro.request_audit import RequestAudit
-from kiro.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, FAKE_REASONING_HANDLING
+from kiro.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_WATCHDOG_ATTEMPTS, FAKE_REASONING_HANDLING
 
 if TYPE_CHECKING:
     from kiro.auth import KiroAuthManager
@@ -949,7 +949,7 @@ async def stream_with_first_token_retry_anthropic(
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
     initial_response: Optional[httpx.Response] = None,
-    max_retries: int = FIRST_TOKEN_MAX_RETRIES,
+    max_retries: int = FIRST_TOKEN_WATCHDOG_ATTEMPTS,
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,

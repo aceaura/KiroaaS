@@ -1743,8 +1743,8 @@ class TestExtractThinkingConfigFromOpenAI:
 
     def test_max_effort_extends_first_token_timeout(self):
         """
-        What it does: Verifies max effort on a supported GPT model uses a 120s wait
-        Purpose: Prevent high-reasoning requests from being retried after 15s
+        What it does: Verifies max effort on a supported GPT model extends the wait
+        Purpose: Prevent high-reasoning requests from premature retries
         """
         print("Creating request for gpt-5.6-sol with reasoning_effort='max'...")
         request = ChatCompletionRequest(
@@ -1756,8 +1756,10 @@ class TestExtractThinkingConfigFromOpenAI:
         print("Resolving first-token timeout...")
         timeout = resolve_openai_first_token_timeout(request)
 
-        print(f"Comparing: expected=120.0, got={timeout}")
-        assert timeout == 120.0
+        # 120s base * 8.0 (max) exceeds the cap, so the wait lands on the cap.
+        print(f"Comparing: expected=280.0, got={timeout}")
+        assert timeout == 280.0
+        assert timeout != 120.0, "effort tier was ignored; timeout stayed at the base value"
 
 
 class TestBuildKiroPayloadIntegration:

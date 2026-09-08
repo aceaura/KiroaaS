@@ -41,7 +41,7 @@ from kiro.utils import generate_completion_id
 from kiro.request_audit import RequestAudit
 from kiro.config import (
     FIRST_TOKEN_TIMEOUT,
-    FIRST_TOKEN_MAX_RETRIES,
+    FIRST_TOKEN_WATCHDOG_ATTEMPTS,
     FAKE_REASONING_HANDLING,
 )
 from kiro.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
@@ -607,7 +607,7 @@ async def stream_with_first_token_retry(
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
     initial_response: Optional[httpx.Response] = None,
-    max_retries: int = FIRST_TOKEN_MAX_RETRIES,
+    max_retries: int = FIRST_TOKEN_WATCHDOG_ATTEMPTS,
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
     request_tools: Optional[list] = None,

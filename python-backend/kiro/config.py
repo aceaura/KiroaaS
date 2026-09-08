@@ -355,10 +355,12 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Timeout for waiting for the first token from the model (in seconds).
 # If the model doesn't respond within this time, the request will be cancelled and retried.
-# This helps handle "stuck" requests when the model takes too long to think.
-# Default: 30 seconds (recommended for production)
-# Set a lower value (e.g., 10-15) for more aggressive retry.
-FIRST_TOKEN_TIMEOUT: float = float(os.getenv("FIRST_TOKEN_TIMEOUT", "15"))
+# This helps handle "stuck" requests where Kiro returns 200 but never sends a byte.
+# Default: 120 seconds. Reasoning models can legitimately stay silent for a long
+# time before their first byte, and retrying them restarts the reasoning from
+# scratch, so an aggressive threshold costs quota without producing a response.
+# Set a lower value for faster detection of genuinely stuck requests.
+FIRST_TOKEN_TIMEOUT: float = float(os.getenv("FIRST_TOKEN_TIMEOUT", "120"))
 
 # Read timeout for streaming responses (in seconds).
 # This is the maximum time to wait for data between chunks during streaming.
@@ -367,10 +369,19 @@ FIRST_TOKEN_TIMEOUT: float = float(os.getenv("FIRST_TOKEN_TIMEOUT", "15"))
 # Default: 300 seconds (5 minutes) - generous timeout to avoid premature disconnects.
 STREAMING_READ_TIMEOUT: float = float(os.getenv("STREAMING_READ_TIMEOUT", "300"))
 
-# Maximum number of attempts on first token timeout.
-# After exhausting all attempts, an error will be returned.
+# Transport-level attempt count for streaming requests (network errors, 429, 5xx).
+# Despite the name, this is consumed by http_client, not by the first-token
+# watchdog. Retrying here is cheap: it happens before the model produces output.
 # Default: 3 attempts
 FIRST_TOKEN_MAX_RETRIES: int = int(os.getenv("FIRST_TOKEN_MAX_RETRIES", "3"))
+
+# Attempt count for the first-token watchdog in the streaming layers.
+# After exhausting all attempts, a 504 is returned.
+# Default: 1 attempt (no retry). Unlike a transport retry, this makes the model
+# redo its reasoning from scratch, burning quota without producing a response,
+# and it multiplies the worst-case wall time by this count. Raise it only if you
+# see genuinely stuck upstream requests that succeed on a second try.
+FIRST_TOKEN_WATCHDOG_ATTEMPTS: int = int(os.getenv("FIRST_TOKEN_WATCHDOG_ATTEMPTS", "1"))
 
 # Reasoning effort can delay the first upstream byte well beyond the normal
 # stuck-request threshold. Scale the base timeout by tier instead of retrying
@@ -384,7 +395,12 @@ EFFORT_FIRST_TOKEN_TIMEOUT_MULTIPLIERS: Dict[str, float] = {
 }
 
 # Upper bound for effort-scaled first-token waits. Set to 0 to disable the cap.
-EFFORT_FIRST_TOKEN_TIMEOUT_CAP: float = float(os.getenv("EFFORT_FIRST_TOKEN_TIMEOUT_CAP", "120"))
+#
+# Must stay below STREAMING_READ_TIMEOUT: the first-token wait is an
+# asyncio.wait_for around an httpx byte iterator, so both timers race the same
+# await. At or above the httpx read timeout, httpx raises ReadTimeout first and
+# this watchdog never fires. 280 leaves headroom below the 300s default.
+EFFORT_FIRST_TOKEN_TIMEOUT_CAP: float = float(os.getenv("EFFORT_FIRST_TOKEN_TIMEOUT_CAP", "280"))
 
 # ==================================================================================================
 # Debug Settings
