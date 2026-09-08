@@ -1,9 +1,10 @@
 import { useState, useEffect, useImperativeHandle, forwardRef } from 'react';
 import { useI18n } from '@/hooks/useI18n';
 import type { AppConfig, AuthMethod } from '@/lib/config';
-import { scanAllCredentials, type CredentialScanResult, /* installUpdate, */ getAppVersion, startServer, stopServer, getPortOccupier, terminateProcess } from '@/lib/tauri';
+import { scanAllCredentials, type CredentialScanResult, getAppVersion, startServer, stopServer, getPortOccupier, terminateProcess } from '@/lib/tauri';
 import { open as shellOpen } from '@tauri-apps/api/shell';
 import { checkVersionUpdate, type UpdateInfo } from '@/lib/versionCheck';
+import { LATEST_RELEASE_URL } from '@/lib/config';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -67,7 +68,6 @@ export const SettingsForm = forwardRef<SettingsFormHandle, SettingsFormProps>(fu
     // Update check state
     const [appVersion, setAppVersion] = useState('');
     const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
-    // const [isInstalling, setIsInstalling] = useState(false); // TODO: 恢复 Tauri 原生更新时启用
     const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
     const [updateError, setUpdateError] = useState<string | null>(null);
 
@@ -364,7 +364,7 @@ export const SettingsForm = forwardRef<SettingsFormHandle, SettingsFormProps>(fu
         setUpdateInfo(null);
 
         try {
-            const data = await checkVersionUpdate(config, 'manual');
+            const data = await checkVersionUpdate();
             if (data) {
                 setUpdateInfo(data);
             } else {
@@ -378,18 +378,7 @@ export const SettingsForm = forwardRef<SettingsFormHandle, SettingsFormProps>(fu
     };
 
     const handleInstallUpdate = async () => {
-        // TODO: 恢复 Tauri 原生更新逻辑
-        // setIsInstalling(true);
-        // try {
-        //     await installUpdate();
-        // } catch (err) {
-        //     setUpdateError(t('updateCheckFailed'));
-        // } finally {
-        //     setIsInstalling(false);
-        // }
-
-        // 临时：用系统浏览器打开官网下载
-        await shellOpen('https://kiroaas.hnew.city');
+        await shellOpen(updateInfo?.downloadUrl ?? LATEST_RELEASE_URL);
     };
 
     const hintEnter = (key: SettingsHintKey) => () => onHintChange?.(key);

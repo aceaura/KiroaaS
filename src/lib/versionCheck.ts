@@ -1,9 +1,5 @@
-import { platform, arch, version } from '@tauri-apps/api/os';
-import { VERSION_CHECK_API } from './config';
-import type { AppConfig } from './config';
-import { getAppVersion, getDeviceModel } from './tauri';
-
-export type UpdateTrigger = 'manual' | 'app_start' | 'app_close' | 'scheduled';
+import { LATEST_RELEASE_API } from './config';
+import { getAppVersion } from './tauri';
 
 export interface UpdateInfo {
   hasUpdate: boolean;
@@ -13,40 +9,58 @@ export interface UpdateInfo {
   changelog?: Array<{ version: string; changes: string[] }>;
 }
 
-export async function checkVersionUpdate(
-  config: AppConfig,
-  trigger: UpdateTrigger,
-): Promise<UpdateInfo | null> {
+interface GitHubRelease {
+  tag_name: string;
+  html_url: string;
+  body?: string | null;
+}
+
+function parseVersion(v: string): number[] {
+  return v
+    .replace(/^v/i, '')
+    .split('.')
+    .map((part) => parseInt(part, 10) || 0);
+}
+
+function isNewerVersion(latest: string, current: string): boolean {
+  const a = parseVersion(latest);
+  const b = parseVersion(current);
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff > 0;
+  }
+  return false;
+}
+
+export async function checkVersionUpdate(): Promise<UpdateInfo | null> {
   try {
-    const clientId = config.client_id || '';
+    const currentVersion = await getAppVersion();
 
-    const [appVersion, currentPlatform, currentArch, osVersion, deviceModel] = await Promise.all([
-      getAppVersion(),
-      platform(),
-      arch(),
-      version(),
-      getDeviceModel(),
-    ]);
-
-    const requestBody = {
-      currentVersion: appVersion,
-      platform: currentPlatform,
-      arch: currentArch,
-      osVersion,
-      deviceModel,
-      clientId,
-      trigger,
-    };
-    console.log('[CheckUpdate] Request:', VERSION_CHECK_API, requestBody);
-
-    const response = await fetch(VERSION_CHECK_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
+    const response = await fetch(LATEST_RELEASE_API, {
+      headers: { Accept: 'application/vnd.github+json' },
     });
-    const data: UpdateInfo = await response.json();
-    console.log('[CheckUpdate] Response:', response.status, data);
-    return data;
+    if (!response.ok) {
+      throw new Error(`GitHub API responded ${response.status}`);
+    }
+    const release: GitHubRelease = await response.json();
+
+    const latestVersion = release.tag_name.replace(/^v/i, '');
+    const changes = (release.body ?? '')
+      .split('\n')
+      .map((line) => line.trim().replace(/^[-*]\s+/, ''))
+      .filter(Boolean)
+      .slice(0, 30);
+
+    const info: UpdateInfo = {
+      hasUpdate: isNewerVersion(latestVersion, currentVersion),
+      latestVersion,
+      currentVersion,
+      downloadUrl: release.html_url,
+      changelog: changes.length ? [{ version: latestVersion, changes }] : undefined,
+    };
+    console.log('[CheckUpdate]', info);
+    return info;
   } catch (err) {
     console.error('[CheckUpdate] Failed:', err);
     return null;

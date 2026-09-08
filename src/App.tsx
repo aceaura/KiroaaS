@@ -14,9 +14,9 @@ import type { AppConfig } from './lib/config';
 import { useI18n } from './hooks/useI18n';
 import { useServerStatus } from './hooks/useServerStatus';
 import { useConversations } from './hooks/useConversations';
-import { startServer, stopServer, getServerLogs, getAppVersion, getDeviceModel, updateTrayServerState, getPortOccupier, terminateProcess, cloudGetSession } from './lib/tauri';
+import { startServer, stopServer, getServerLogs, updateTrayServerState, getPortOccupier, terminateProcess, cloudGetSession } from './lib/tauri';
 import { checkVersionUpdate } from './lib/versionCheck';
-import { platform, arch, version } from '@tauri-apps/api/os';
+import { platform } from '@tauri-apps/api/os';
 
 // UI Components
 import { Button } from '@/components/ui/button';
@@ -112,37 +112,15 @@ export default function App() {
   useEffect(() => {
     if (isConfigLoading) return;
 
-    // Cache device info for beforeunload
-    let cachedInfo = { currentVersion: '', platform: '', arch: '', osVersion: '', deviceModel: '' };
-    Promise.all([getAppVersion(), platform(), arch(), version(), getDeviceModel()])
-      .then(([v, p, a, o, d]) => {
-        cachedInfo = { currentVersion: v, platform: p, arch: a, osVersion: o, deviceModel: d };
-      })
-      .catch(() => {});
+    checkVersionUpdate().catch(() => {});
 
-    // 1. App start
-    checkVersionUpdate(config, 'app_start').catch(() => {});
-
-    // 3. Scheduled every 6 hours
     const SIX_HOURS = 6 * 60 * 60 * 1000;
     const interval = setInterval(() => {
-      checkVersionUpdate(config, 'scheduled').catch(() => {});
+      checkVersionUpdate().catch(() => {});
     }, SIX_HOURS);
-
-    // 2. App close (beforeunload)
-    const handleBeforeUnload = () => {
-      const body = JSON.stringify({
-        ...cachedInfo,
-        clientId: config.client_id || '',
-        trigger: 'app_close',
-      });
-      navigator.sendBeacon?.('https://api.kiroaas.hnew.city/version', body);
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
       clearInterval(interval);
-      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, [isConfigLoading]);
 

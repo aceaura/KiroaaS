@@ -81,14 +81,6 @@
     "security": {
       "csp": null
     },
-    "updater": {
-      "active": true,
-      "endpoints": [
-        "https://kiroaas.hnew.city/releases/latest.json"
-      ],
-      "dialog": true,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ1QzMwMTNENUJDRTRBNUEKUldSYVNzNWJQUUhEMVlhK3B2cEl1elFYMmhNRldhcHNITm9WaUVOVFlmN3pxZE03SWlRNUJlUjAK"
-    },
     "systemTray": {
       "iconPath": "icons/tray-icon.png",
       "iconAsTemplate": true

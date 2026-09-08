@@ -68,14 +68,6 @@ export async function terminateProcess(pid: number): Promise<void> {
   return await invoke('terminate_process', { pid });
 }
 
-export async function checkForUpdates(): Promise<boolean> {
-  return await invoke('check_for_updates');
-}
-
-export async function installUpdate(): Promise<void> {
-  return await invoke('install_update');
-}
-
 export async function getAppVersion(): Promise<string> {
   return await invoke('get_app_version');
 }

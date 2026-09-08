@@ -68,4 +68,6 @@ export interface ServerStatusInfo {
   error?: string;
 }
 
-export const VERSION_CHECK_API = 'https://api.kiroaas.hnew.city/version';
+export const GITHUB_REPO = 'aceaura/KiroaaS';
+export const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+export const LATEST_RELEASE_URL = `https://github.com/${GITHUB_REPO}/releases/latest`;
