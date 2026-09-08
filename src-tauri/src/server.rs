@@ -16,6 +16,34 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Terminate any kiro-gateway.exe still running from the given extract
+/// directory. Such orphans survive app crashes or upgrades from versions
+/// without single-instance enforcement; on Windows their locked files block
+/// re-extraction and their bound port blocks the new backend.
+#[cfg(all(windows, not(debug_assertions)))]
+fn kill_stale_backend_processes(extract_dir: &std::path::Path) {
+    let exe_path = extract_dir.join("kiro-gateway").join("kiro-gateway.exe");
+    let exe_str = exe_path.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "Get-Process kiro-gateway -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{}' }} | Select-Object -ExpandProperty Id",
+        exe_str
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    if let Ok(out) = output {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Ok(pid) = line.trim().parse::<u32>() {
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+            }
+        }
+    }
+}
+
 /// Server status information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerStatus {
@@ -69,6 +97,26 @@ impl ServerManager {
             error: None,
         };
 
+        let result = self.start_inner(config).await;
+        if let Err(e) = &result {
+            // Failures before the health-check loop (extraction, spawn) would
+            // otherwise return with the status stuck on "starting", leaving
+            // the UI badge spinning forever.
+            if self.status.status == "starting" {
+                if let Ok(mut logs) = self.logs.lock() {
+                    logs.push(format!("[Error] {}", e));
+                }
+                self.status = ServerStatus {
+                    status: "error".to_string(),
+                    port: None,
+                    error: Some(e.clone()),
+                };
+            }
+        }
+        result
+    }
+
+    async fn start_inner(&mut self, config: AppConfig) -> Result<ServerStatus, String> {
         // Get the Python executable path
         let python_exe = self.get_python_executable_path()?;
 
@@ -490,10 +538,25 @@ impl ServerManager {
                     return Err(format!("Bundled archive not found at: {:?}", tar_gz_path));
                 }
 
-                // Clean and recreate extract directory
+                // Clean and recreate extract directory. A backend orphaned by
+                // a previous instance keeps running from this directory and,
+                // on Windows, locks its files — kill it and retry once.
                 if extract_dir.exists() {
-                    std::fs::remove_dir_all(&extract_dir)
-                        .map_err(|e| format!("Failed to clean extract dir: {}", e))?;
+                    if let Err(e) = std::fs::remove_dir_all(&extract_dir) {
+                        #[cfg(windows)]
+                        {
+                            kill_stale_backend_processes(&extract_dir);
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            std::fs::remove_dir_all(&extract_dir).map_err(|e2| {
+                                format!(
+                                    "Failed to clean extract dir: {} (retry after killing stale backend: {})",
+                                    e, e2
+                                )
+                            })?;
+                        }
+                        #[cfg(not(windows))]
+                        return Err(format!("Failed to clean extract dir: {}", e));
+                    }
                 }
                 std::fs::create_dir_all(&extract_dir)
                     .map_err(|e| format!("Failed to create extract dir: {}", e))?;
