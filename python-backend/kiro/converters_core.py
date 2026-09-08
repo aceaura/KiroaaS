@@ -1828,17 +1828,25 @@ async def build_kiro_history(
     for msg in messages:
         if msg.role == "user":
             content = extract_text_content(msg.content)
-            
-            # Fallback for empty content - Kiro API requires non-empty content
+
+            # Process tool_results - convert to Kiro format if present
+            if msg.tool_results:
+                kiro_tool_results = convert_tool_results_to_kiro_format(msg.tool_results)
+            else:
+                # Try to extract from content (already in Kiro format)
+                kiro_tool_results = extract_tool_results_from_content(msg.content)
+
+            # Kiro accepts empty content when the message carries toolResults,
+            # so pure tool-result turns send "" instead of a visible placeholder.
             if not content:
-                content = "(empty placeholder)"
-            
+                content = "" if kiro_tool_results else "(empty placeholder)"
+
             user_input = {
                 "content": content,
                 "modelId": model_id,
                 "origin": "AI_EDITOR",
             }
-            
+
             # Process images - extract from message or content
             # IMPORTANT: images go directly into userInputMessage, NOT into userInputMessageContext
             # This matches the native Kiro IDE format
@@ -1847,41 +1855,27 @@ async def build_kiro_history(
                 kiro_images = convert_images_to_kiro_format(images)
                 if kiro_images:
                     user_input["images"] = kiro_images
-            
-            # Build userInputMessageContext for tools and toolResults only
-            user_input_context: Dict[str, Any] = {}
-            
-            # Process tool_results - convert to Kiro format if present
-            if msg.tool_results:
-                kiro_tool_results = convert_tool_results_to_kiro_format(msg.tool_results)
-                if kiro_tool_results:
-                    user_input_context["toolResults"] = kiro_tool_results
-            else:
-                # Try to extract from content (already in Kiro format)
-                tool_results = extract_tool_results_from_content(msg.content)
-                if tool_results:
-                    user_input_context["toolResults"] = tool_results
-            
-            # Add context if not empty (contains toolResults only, not images)
-            if user_input_context:
-                user_input["userInputMessageContext"] = user_input_context
-            
+
+            if kiro_tool_results:
+                user_input["userInputMessageContext"] = {"toolResults": kiro_tool_results}
+
             history.append({"userInputMessage": user_input})
             
         elif msg.role == "assistant":
             content = extract_text_content(msg.content)
-            
-            # Fallback for empty content - Kiro API requires non-empty content
-            if not content:
-                content = "(empty placeholder)"
-            
-            assistant_response = {"content": content}
-            
+
             # Process tool_calls
             tool_uses = extract_tool_uses_from_message(msg.content, msg.tool_calls)
+
+            # Kiro rejects a missing content key but accepts an empty string, so
+            # pure tool-call turns send "" instead of a visible placeholder.
+            if not content:
+                content = "" if tool_uses else "(empty placeholder)"
+
+            assistant_response = {"content": content}
             if tool_uses:
                 assistant_response["toolUses"] = tool_uses
-            
+
             history.append({"assistantResponseMessage": assistant_response})
     
     return history
@@ -2099,9 +2093,13 @@ async def build_kiro_payload(
         })
         current_content = "(empty placeholder)"
     
-    # If content is empty - use placeholder
+    # If content is empty and the message carries tool results, Kiro accepts
+    # an empty string; only use the visible placeholder for truly empty turns.
     if not current_content:
-        current_content = "(empty placeholder)"
+        has_tool_results = bool(current_message.tool_results) or bool(
+            extract_tool_results_from_content(current_message.content)
+        )
+        current_content = "" if has_tool_results else "(empty placeholder)"
     
     # Process images in current message - extract from message or content
     # IMPORTANT: images go directly into userInputMessage, NOT into userInputMessageContext

@@ -4834,14 +4834,76 @@ class TestBuildKiroHistory:
         """
         print("Setup: Assistant message with None content...")
         messages = [UnifiedMessage(role="assistant", content=None)]
-        
+
         print("Action: Building history...")
         result = await build_kiro_history(messages, "claude-sonnet-4")
-        
+
         print(f"Result: {result}")
         print(f"Content: '{result[0]['assistantResponseMessage']['content']}'")
         print("Checking that '(empty placeholder)' placeholder is added...")
         assert result[0]["assistantResponseMessage"]["content"] == "(empty placeholder)"
+
+    async def test_empty_content_assistant_with_tool_calls_sends_empty_string(self):
+        """
+        What it does: Verifies assistant messages with tool_calls and empty content send "" instead of placeholder.
+        Purpose: Hide "(empty placeholder)" from the model on pure tool-call turns.
+
+        Live-verified against the Kiro API: assistantResponseMessage with toolUses
+        accepts an empty-string content, but rejects a missing content key (400
+        REQUEST_BODY_INVALID). The visible "(empty placeholder)" text polluted the
+        model context between consecutive tool calls.
+        """
+        print("Setup: Assistant message with tool_calls and empty content...")
+        messages = [
+            UnifiedMessage(
+                role="assistant",
+                content=None,
+                tool_calls=[{
+                    "id": "call_123",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"location": "Moscow"}'
+                    }
+                }]
+            )
+        ]
+
+        print("Action: Building history...")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
+
+        print(f"Result: {result}")
+        assistant_msg = result[0]["assistantResponseMessage"]
+        print("Checking content is empty string and toolUses are present...")
+        assert assistant_msg["content"] == ""
+        assert "toolUses" in assistant_msg
+
+    async def test_empty_content_user_with_tool_results_sends_empty_string(self):
+        """
+        What it does: Verifies user messages with tool_results and empty content send "" instead of placeholder.
+        Purpose: Hide "(empty placeholder)" from the model on pure tool-result turns.
+
+        Live-verified against the Kiro API: userInputMessage with toolResults in
+        userInputMessageContext accepts an empty-string content.
+        """
+        print("Setup: User message with tool_results and empty content...")
+        messages = [
+            UnifiedMessage(
+                role="user",
+                content=None,
+                tool_results=[
+                    {"type": "tool_result", "tool_use_id": "call_123", "content": "Result text"}
+                ]
+            )
+        ]
+
+        print("Action: Building history...")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
+
+        print(f"Result: {result}")
+        user_msg = result[0]["userInputMessage"]
+        print("Checking content is empty string and toolResults are in context...")
+        assert user_msg["content"] == ""
+        assert "toolResults" in user_msg["userInputMessageContext"]
     
     async def test_preserves_non_empty_content_in_history(self):
         """
@@ -6417,6 +6479,58 @@ class TestBuildKiroPayloadIssue20:
                     found_tool_uses = True
                     break
         assert found_tool_uses, "toolUses should be preserved when tools are defined"
+
+    async def test_current_message_tool_result_sends_empty_content(self):
+        """
+        What it does: Verifies that a current message carrying only tool_results sends content "".
+        Purpose: Hide "(empty placeholder)" on the most common agent-loop turn
+        (tool result as the last message). Live-verified against the Kiro API.
+        """
+        print("Setup: Last message is a tool result with empty text...")
+        messages = [
+            UnifiedMessage(role="user", content="Call a tool"),
+            UnifiedMessage(
+                role="assistant",
+                content="",
+                tool_calls=[{
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "test_tool", "arguments": "{}"}
+                }]
+            ),
+            UnifiedMessage(
+                role="user",
+                content="",
+                tool_results=[{
+                    "type": "tool_result",
+                    "tool_use_id": "call_123",
+                    "content": "Tool executed"
+                }]
+            ),
+        ]
+
+        tools = [UnifiedTool(
+            name="test_tool",
+            description="A test tool",
+            input_schema={"type": "object", "properties": {}}
+        )]
+
+        print("Action: Building Kiro payload...")
+        result = await build_kiro_payload(
+            messages=messages,
+            system_prompt="",
+            model_id="claude-sonnet-4",
+            tools=tools,
+            conversation_id="test-conv",
+            profile_arn="arn:test",
+            thinking_config=ThinkingConfig(enabled=False)
+        )
+
+        current_msg = result.payload["conversationState"]["currentMessage"]["userInputMessage"]
+        print(f"Current message content: {current_msg['content']!r}")
+        assert current_msg["content"] == ""
+        context = current_msg.get("userInputMessageContext", {})
+        assert "toolResults" in context
     
     async def test_empty_tools_list_triggers_stripping(self):
         """
