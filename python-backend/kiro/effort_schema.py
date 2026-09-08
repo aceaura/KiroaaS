@@ -79,8 +79,20 @@ def clamp_effort(requested: str, allowed: Tuple[str, ...]) -> Optional[str]:
     return min(candidates, key=EFFORT_ORDER.index)
 
 
-def resolve_effort_decision(model_id: str, effort: Optional[str]) -> EffortDecision:
-    """Resolve a requested tier into an auditable native-field decision."""
+def resolve_effort_decision(
+    model_id: str,
+    effort: Optional[str],
+    default_tier: Optional[str] = None,
+) -> EffortDecision:
+    """Resolve a requested tier into an auditable native-field decision.
+
+    Args:
+        model_id: Resolved Kiro model identifier.
+        effort: Client-requested tier, or None when the client was silent.
+        default_tier: Tier to apply for silent clients. Callers must pass None
+            when the client explicitly disabled thinking so that an explicit
+            disable is never overridden by the default.
+    """
     if not NATIVE_EFFORT_ENABLED:
         return EffortDecision(
             requested=effort,
@@ -93,6 +105,21 @@ def resolve_effort_decision(model_id: str, effort: Optional[str]) -> EffortDecis
         )
 
     if not effort:
+        if default_tier:
+            schema = lookup_effort_schema(model_id)
+            if schema is not None:
+                # clamp_effort also guards a misconfigured default tier.
+                adopted = clamp_effort(default_tier, schema[1])
+                if adopted is not None:
+                    return EffortDecision(
+                        requested=None,
+                        adopted=adopted,
+                        schema_path=schema[0],
+                        fragment={schema[0]: {"effort": adopted}},
+                        clamped=False,
+                        outcome="native",
+                        reason="default",
+                    )
         return EffortDecision(
             requested=effort,
             adopted=None,
@@ -152,15 +179,22 @@ def resolve_native_effort(model_id: str, effort: Optional[str]) -> Optional[Effo
     return decision if decision.fragment is not None else None
 
 
-def resolve_first_token_timeout(model_id: str, effort: Optional[str]) -> float:
+def resolve_first_token_timeout(
+    model_id: str,
+    effort: Optional[str],
+    default_tier: Optional[str] = None,
+) -> float:
     """Resolve the first-byte wait appropriate for a requested effort tier.
 
     The adopted tier takes precedence so a model-specific clamp also lowers the
     wait. Unsupported models still scale on the normalized requested tier because
-    their prompt-tag reasoning path can also delay first output.
+    their prompt-tag reasoning path can also delay first output. Silent clients
+    scale on default_tier, matching the tier that will actually be sent upstream.
     """
     if not effort or not isinstance(effort, str):
-        return FIRST_TOKEN_TIMEOUT
+        effort = default_tier
+        if not effort:
+            return FIRST_TOKEN_TIMEOUT
 
     requested = effort.strip().lower()
     if not requested or requested == "none":

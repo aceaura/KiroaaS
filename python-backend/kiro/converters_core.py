@@ -49,6 +49,7 @@ from kiro.config import (
     KIRO_MAX_PAYLOAD_BYTES,
     AUTO_TRIM_PAYLOAD,
     NATIVE_EFFORT_ENABLED,
+    NATIVE_EFFORT_DEFAULT,
     NATIVE_EFFORT_NONE_ON_DISABLED,
     NATIVE_EFFORT_SUPPRESS_TAGS,
     FETCH_IMAGE_URLS,
@@ -1981,9 +1982,13 @@ async def build_kiro_payload(
 
     if not thinking_config.enabled:
         requested_effort = "none" if NATIVE_EFFORT_NONE_ON_DISABLED else None
+        default_effort = None
     else:
         requested_effort = thinking_config.effort
-    effort_decision = resolve_effort_decision(model_id, requested_effort)
+        default_effort = NATIVE_EFFORT_DEFAULT
+    effort_decision = resolve_effort_decision(
+        model_id, requested_effort, default_tier=default_effort
+    )
     if request_audit is not None:
         request_audit.record_effort(model_id, effort_decision)
     else:

@@ -38,6 +38,7 @@ from kiro.config import (
     EFFORT_ORDER,
     HIDDEN_MODELS,
     MODEL_ALIASES,
+    NATIVE_EFFORT_DEFAULT,
     OPENAI_EFFORT_ALIASES,
 )
 from kiro.model_resolver import get_model_id_for_kiro
@@ -370,7 +371,11 @@ def resolve_openai_first_token_timeout(request: ChatCompletionRequest) -> float:
     """Resolve the first-byte wait for this request's effective effort tier."""
     model_id = get_model_id_for_kiro(request.model, HIDDEN_MODELS, MODEL_ALIASES)
     thinking_config = extract_thinking_config_from_openai(request)
-    return resolve_first_token_timeout(model_id, thinking_config.effort)
+    return resolve_first_token_timeout(
+        model_id,
+        thinking_config.effort,
+        default_tier=NATIVE_EFFORT_DEFAULT if thinking_config.enabled else None,
+    )
 
 
 # ==================================================================================================

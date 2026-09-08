@@ -1989,6 +1989,83 @@ class TestExtractThinkingConfigFromAnthropic:
 class TestAnthropicToKiroIntegration:
     """Integration tests for anthropic_to_kiro with thinking config."""
 
+    async def test_silent_client_gets_default_medium(self):
+        """
+        What it does: Verifies a request without thinking config gets the default tier
+        Purpose: Silent clients on schema models receive deterministic native effort
+        """
+        print("Creating plain request for claude-opus-5 (no thinking field)...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = await anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+
+        print("Checking default native effort was applied...")
+        assert payload["additionalModelRequestFields"] == {
+            "output_config": {"effort": "medium"},
+        }
+
+        print("Checking legacy thinking tags were suppressed...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>" not in content
+        assert "<max_thinking_length>" not in content
+
+    async def test_silent_client_unsupported_model_keeps_legacy_tags(self):
+        """
+        What it does: Verifies the default tier never reaches models outside the schema
+        Purpose: Unsupported models keep the legacy prompt-tag reasoning path
+        """
+        print("Creating plain request for claude-sonnet-4.5...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-sonnet-4.5"):
+            with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+                payload = await anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+
+        print("Checking no native fields were fabricated...")
+        assert "additionalModelRequestFields" not in payload
+
+        print("Checking legacy thinking tags are still injected...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>enabled</thinking_mode>" in content
+
+    async def test_explicit_disable_not_overridden_by_default(self):
+        """
+        What it does: Verifies thinking=disabled stays disabled despite the default
+        Purpose: An explicit client disable must never be overridden by a default tier
+        """
+        print("Creating disabled-thinking request for claude-opus-5...")
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+            thinking={"type": "disabled"},
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
+            payload = await anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+
+        print("Checking no effort field was sent (claude has no native 'none')...")
+        assert "additionalModelRequestFields" not in payload
+
+        print("Checking no thinking tags were injected...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        # The legitimation system-prompt addition mentions tag names in backticks
+        # even when thinking is disabled; the real injection is an unquoted prefix.
+        assert not content.startswith("<thinking_mode>")
+        assert "<thinking_mode>enabled</thinking_mode>\n" not in content
+
     async def test_extracts_and_passes_thinking_config(self):
         """
         What it does: Verifies anthropic_to_kiro extracts thinking_config and passes to core

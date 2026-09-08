@@ -174,6 +174,87 @@ class TestResolveEffortDecision:
         assert decision.reason == "no_request"
         assert decision.fragment is None
 
+    def test_default_tier_applied_when_client_silent(self):
+        """
+        What it does: Verifies the default tier fills in for silent clients
+        Purpose: Silent clients get a deterministic native tier on schema models
+        """
+        print("Resolving silent request with default 'medium' for claude-opus-5...")
+        decision = resolve_effort_decision("claude-opus-5", None, default_tier="medium")
+
+        print(f"Decision: {decision}")
+        assert decision.outcome == "native"
+        assert decision.reason == "default"
+        assert decision.requested is None
+        assert decision.adopted == "medium"
+        assert decision.clamped is False
+        assert decision.fragment == {"output_config": {"effort": "medium"}}
+
+    def test_default_tier_skipped_for_unsupported_model(self):
+        """
+        What it does: Verifies the default tier is not sent to unknown models
+        Purpose: Models outside the schema table must never receive the field
+        """
+        print("Resolving silent request with default for claude-sonnet-4.5...")
+        decision = resolve_effort_decision("claude-sonnet-4.5", None, default_tier="medium")
+
+        print(f"Decision: {decision}")
+        assert decision.outcome == "omitted"
+        assert decision.reason == "no_request"
+        assert decision.fragment is None
+
+    def test_default_tier_none_disables_on_gpt(self):
+        """
+        What it does: Verifies a 'none' default sends reasoning.effort=none on GPT
+        Purpose: Allow operators to default silent clients to no reasoning
+        """
+        print("Resolving silent request with default 'none' for gpt-5.5...")
+        decision = resolve_effort_decision("gpt-5.5", None, default_tier="none")
+
+        print(f"Decision: {decision}")
+        assert decision.outcome == "native"
+        assert decision.reason == "default"
+        assert decision.fragment == {"reasoning": {"effort": "none"}}
+
+    def test_default_tier_none_omitted_on_claude(self):
+        """
+        What it does: Verifies a 'none' default is omitted on Claude models
+        Purpose: Claude has no native 'none' tier, so nothing may be fabricated
+        """
+        print("Resolving silent request with default 'none' for claude-opus-5...")
+        decision = resolve_effort_decision("claude-opus-5", None, default_tier="none")
+
+        print(f"Decision: {decision}")
+        assert decision.outcome == "omitted"
+        assert decision.reason == "no_request"
+
+    def test_invalid_default_tier_falls_back(self):
+        """
+        What it does: Verifies a misconfigured default tier lands on EFFORT_FALLBACK
+        Purpose: A bad env value must degrade to the safe tier, never pass through
+        """
+        print("Resolving silent request with invalid default 'turbo'...")
+        decision = resolve_effort_decision("claude-opus-5", None, default_tier="turbo")
+
+        print(f"Decision: {decision}")
+        assert decision.outcome == "native"
+        assert decision.reason == "default"
+        assert decision.adopted == EFFORT_FALLBACK
+        assert decision.fragment == {"output_config": {"effort": EFFORT_FALLBACK}}
+
+    def test_explicit_effort_overrides_default(self):
+        """
+        What it does: Verifies an explicit client tier wins over the default
+        Purpose: The default must never override what the client asked for
+        """
+        print("Resolving explicit 'high' with default 'medium' for claude-opus-5...")
+        decision = resolve_effort_decision("claude-opus-5", "high", default_tier="medium")
+
+        print(f"Decision: {decision}")
+        assert decision.outcome == "native"
+        assert decision.reason == "exact"
+        assert decision.adopted == "high"
+
     def test_unsupported_model(self):
         """
         What it does: Verifies an effort request for an unknown model is omitted
@@ -332,6 +413,50 @@ class TestResolveFirstTokenTimeout:
         """
         print("Resolving timeout for unknown effort='ultra'...")
         timeout = resolve_first_token_timeout("gpt-5.6-sol", "ultra")
+
+        print(f"Comparing: expected=240.0, got={timeout}")
+        assert timeout == 240.0
+
+    def test_default_tier_scales_silent_client(self):
+        """
+        What it does: Verifies silent clients scale on the configured default tier
+        Purpose: Match the wait to the tier actually sent upstream (medium 2.0x)
+        """
+        print("Resolving timeout for silent client with default 'medium'...")
+        timeout = resolve_first_token_timeout("gpt-5.6-sol", None, default_tier="medium")
+
+        print(f"Comparing: expected=240.0, got={timeout}")
+        assert timeout == 240.0
+
+    def test_default_tier_none_uses_base_timeout(self):
+        """
+        What it does: Verifies a 'none' default keeps the base timeout
+        Purpose: Defaulting to no reasoning must not extend the wait
+        """
+        print("Resolving timeout for silent client with default 'none'...")
+        timeout = resolve_first_token_timeout("gpt-5.6-sol", None, default_tier="none")
+
+        print(f"Comparing: expected=120.0, got={timeout}")
+        assert timeout == 120.0
+
+    def test_explicit_effort_overrides_default_timeout(self):
+        """
+        What it does: Verifies an explicit tier wins over the default for timeouts
+        Purpose: The default must never widen or shrink a requested tier's wait
+        """
+        print("Resolving timeout for explicit 'low' with default 'high'...")
+        timeout = resolve_first_token_timeout("gpt-5.6-sol", "low", default_tier="high")
+
+        print(f"Comparing: expected=180.0 (low 1.5x), got={timeout}")
+        assert timeout == 180.0
+
+    def test_non_string_effort_falls_through_to_default(self):
+        """
+        What it does: Verifies a non-string effort is replaced by the default tier
+        Purpose: Malformed client values must not silently skip timeout scaling
+        """
+        print("Resolving timeout for effort=123 with default 'medium'...")
+        timeout = resolve_first_token_timeout("gpt-5.6-sol", 123, default_tier="medium")
 
         print(f"Comparing: expected=240.0, got={timeout}")
         assert timeout == 240.0

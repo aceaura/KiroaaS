@@ -1862,6 +1862,98 @@ class TestBuildKiroPayloadIntegration:
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>" not in content
 
+    async def test_silent_client_gets_default_medium(self, monkeypatch):
+        """
+        What it does: Verifies a request without effort gets the default tier
+        Purpose: Silent clients on schema models receive deterministic native effort
+        """
+        print("Setting up mocks...")
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+
+        print("Creating plain request for gpt-5.5 (no reasoning_effort)...")
+        request = ChatCompletionRequest(
+            model="gpt-5.5",
+            messages=[ChatMessage(role="user", content="Test message")],
+        )
+
+        print("Calling build_kiro_payload...")
+        payload = await build_kiro_payload(
+            request_data=request,
+            conversation_id="test-conv-123",
+            profile_arn="arn:aws:test"
+        )
+
+        print("Checking default native effort was applied...")
+        assert payload["additionalModelRequestFields"] == {
+            "reasoning": {"effort": "medium"}
+        }
+
+        print("Checking legacy thinking tags were suppressed...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>" not in content
+        assert "<thinking_effort>" not in content
+        assert "<max_thinking_length>" not in content
+
+    async def test_silent_client_unsupported_model_keeps_legacy_tags(self, monkeypatch):
+        """
+        What it does: Verifies the default tier never reaches models outside the schema
+        Purpose: Unsupported models keep the legacy prompt-tag reasoning path
+        """
+        print("Setting up mocks...")
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+
+        print("Creating plain request for claude-sonnet-4.5...")
+        request = ChatCompletionRequest(
+            model="claude-sonnet-4.5",
+            messages=[ChatMessage(role="user", content="Test message")],
+        )
+
+        print("Calling build_kiro_payload...")
+        payload = await build_kiro_payload(
+            request_data=request,
+            conversation_id="test-conv-123",
+            profile_arn="arn:aws:test"
+        )
+
+        print("Checking no native fields were fabricated...")
+        assert "additionalModelRequestFields" not in payload
+
+        print("Checking legacy thinking tags are still injected...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>enabled</thinking_mode>" in content
+
+    async def test_explicit_disable_not_overridden_by_default(self, monkeypatch):
+        """
+        What it does: Verifies reasoning_effort='none' stays off despite the default
+        Purpose: An explicit client disable must never be overridden by a default tier
+        """
+        print("Setting up mocks...")
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+
+        print("Creating request for claude-opus-5 with reasoning_effort='none'...")
+        request = ChatCompletionRequest(
+            model="claude-opus-5",
+            messages=[ChatMessage(role="user", content="Test message")],
+            reasoning_effort="none"
+        )
+
+        print("Calling build_kiro_payload...")
+        payload = await build_kiro_payload(
+            request_data=request,
+            conversation_id="test-conv-123",
+            profile_arn="arn:aws:test"
+        )
+
+        print("Checking no effort field was sent (claude has no native 'none')...")
+        assert "additionalModelRequestFields" not in payload
+
+        print("Checking no thinking tags were injected...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        # The legitimation system-prompt addition mentions tag names in backticks
+        # even when thinking is disabled; the real injection is an unquoted prefix.
+        assert not content.startswith("<thinking_mode>")
+        assert "<thinking_mode>enabled</thinking_mode>\n" not in content
+
 
 class TestStrictOpenAIToolChoiceIntegration:
     """Tests for strict OpenAI tool-choice payload integration."""

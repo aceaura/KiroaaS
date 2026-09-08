@@ -34,6 +34,7 @@ from kiro.config import (
     GPT_EDIT_RECOVERY,
     HIDDEN_MODELS,
     MODEL_ALIASES,
+    NATIVE_EFFORT_DEFAULT,
 )
 from kiro.model_resolver import get_model_id_for_kiro
 from kiro.effort_schema import resolve_first_token_timeout
@@ -610,7 +611,11 @@ def resolve_anthropic_first_token_timeout(request: AnthropicMessagesRequest) -> 
     """Resolve the first-byte wait for this request's effective effort tier."""
     model_id = get_model_id_for_kiro(request.model, HIDDEN_MODELS, MODEL_ALIASES)
     thinking_config = extract_thinking_config_from_anthropic(request)
-    return resolve_first_token_timeout(model_id, thinking_config.effort)
+    return resolve_first_token_timeout(
+        model_id,
+        thinking_config.effort,
+        default_tier=NATIVE_EFFORT_DEFAULT if thinking_config.enabled else None,
+    )
 
 
 async def anthropic_to_kiro(

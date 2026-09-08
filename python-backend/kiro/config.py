@@ -544,6 +544,17 @@ OPENAI_EFFORT_ALIASES: Dict[str, str] = {"minimal": "low"}
 _NATIVE_EFFORT_RAW: str = os.getenv("NATIVE_EFFORT", "").lower()
 NATIVE_EFFORT_ENABLED: bool = _NATIVE_EFFORT_RAW not in ("false", "0", "no", "disabled", "off")
 
+# Default tier sent to schema-capable models when the client did not request
+# one. Keeps reasoning deterministic across clients instead of depending on
+# each model's server-side default. Set to empty/off to omit the field for
+# silent clients (the pre-default behavior).
+_NATIVE_EFFORT_DEFAULT_RAW: str = os.getenv("NATIVE_EFFORT_DEFAULT", "medium").strip().lower()
+NATIVE_EFFORT_DEFAULT: Optional[str] = (
+    None
+    if _NATIVE_EFFORT_DEFAULT_RAW in ("", "off", "disabled", "false", "0")
+    else _NATIVE_EFFORT_DEFAULT_RAW
+)
+
 _NATIVE_EFFORT_SUPPRESS_TAGS_RAW: str = os.getenv("NATIVE_EFFORT_SUPPRESS_TAGS", "").lower()
 NATIVE_EFFORT_SUPPRESS_TAGS: bool = _NATIVE_EFFORT_SUPPRESS_TAGS_RAW not in (
     "false", "0", "no", "disabled", "off"
