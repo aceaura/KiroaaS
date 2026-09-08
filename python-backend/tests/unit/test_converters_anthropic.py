@@ -612,7 +612,7 @@ class TestExtractToolResultsFromAnthropicContent:
 class TestExtractImagesFromToolResults:
     """Tests for extract_images_from_tool_results function."""
 
-    def test_extracts_single_image_from_tool_result(self):
+    async def test_extracts_single_image_from_tool_result(self):
         """
         What it does: Verifies extraction of a single image from tool_result content.
         Purpose: Ensure images inside tool_results are properly extracted.
@@ -636,14 +636,14 @@ class TestExtractImagesFromToolResults:
         ]
 
         print("Action: Extracting images from tool results...")
-        result = extract_images_from_tool_results(content)
+        result = await extract_images_from_tool_results(content)
 
         print(f"Result: {result}")
         assert len(result) == 1
         assert result[0]["media_type"] == "image/png"
         assert result[0]["data"] == "iVBORw0KGgoAAAANSUhEUg=="
 
-    def test_extracts_multiple_images_from_tool_result(self):
+    async def test_extracts_multiple_images_from_tool_result(self):
         """
         What it does: Verifies extraction of multiple images from tool_result content.
         Purpose: Ensure all images are extracted from a single tool_result.
@@ -675,14 +675,14 @@ class TestExtractImagesFromToolResults:
         ]
 
         print("Action: Extracting images from tool results...")
-        result = extract_images_from_tool_results(content)
+        result = await extract_images_from_tool_results(content)
 
         print(f"Result: {result}")
         assert len(result) == 2
         assert result[0]["media_type"] == "image/png"
         assert result[1]["media_type"] == "image/jpeg"
 
-    def test_extracts_images_from_multiple_tool_results(self):
+    async def test_extracts_images_from_multiple_tool_results(self):
         """
         What it does: Verifies extraction of images from multiple tool_results.
         Purpose: Ensure images from all tool_results are collected.
@@ -720,14 +720,14 @@ class TestExtractImagesFromToolResults:
         ]
 
         print("Action: Extracting images from tool results...")
-        result = extract_images_from_tool_results(content)
+        result = await extract_images_from_tool_results(content)
 
         print(f"Result: {result}")
         assert len(result) == 2
         assert result[0]["data"] == "first_image"
         assert result[1]["data"] == "second_image"
 
-    def test_returns_empty_for_tool_result_without_images(self):
+    async def test_returns_empty_for_tool_result_without_images(self):
         """
         What it does: Verifies empty list returned when tool_result has no images.
         Purpose: Ensure text-only tool_results don't produce spurious images.
@@ -742,12 +742,12 @@ class TestExtractImagesFromToolResults:
         ]
 
         print("Action: Extracting images from tool results...")
-        result = extract_images_from_tool_results(content)
+        result = await extract_images_from_tool_results(content)
 
         print(f"Result: {result}")
         assert result == []
 
-    def test_returns_empty_for_string_content(self):
+    async def test_returns_empty_for_string_content(self):
         """
         What it does: Verifies empty list returned for non-list content.
         Purpose: Ensure string content doesn't cause errors.
@@ -756,12 +756,12 @@ class TestExtractImagesFromToolResults:
         content = "Just a string"
 
         print("Action: Extracting images from tool results...")
-        result = extract_images_from_tool_results(content)
+        result = await extract_images_from_tool_results(content)
 
         print(f"Result: {result}")
         assert result == []
 
-    def test_returns_empty_for_tool_result_with_string_content(self):
+    async def test_returns_empty_for_tool_result_with_string_content(self):
         """
         What it does: Verifies empty list when tool_result content is a string.
         Purpose: Ensure string tool_result content doesn't cause errors.
@@ -776,12 +776,12 @@ class TestExtractImagesFromToolResults:
         ]
 
         print("Action: Extracting images from tool results...")
-        result = extract_images_from_tool_results(content)
+        result = await extract_images_from_tool_results(content)
 
         print(f"Result: {result}")
         assert result == []
 
-    def test_extracts_images_mixed_with_text(self):
+    async def test_extracts_images_mixed_with_text(self):
         """
         What it does: Verifies images are extracted when mixed with text content.
         Purpose: Ensure images are found even when text blocks are present.
@@ -806,7 +806,7 @@ class TestExtractImagesFromToolResults:
         ]
 
         print("Action: Extracting images from tool results...")
-        result = extract_images_from_tool_results(content)
+        result = await extract_images_from_tool_results(content)
 
         print(f"Result: {result}")
         assert len(result) == 1
@@ -951,7 +951,7 @@ class TestExtractToolUsesFromAnthropicContent:
 class TestConvertAnthropicMessages:
     """Tests for convert_anthropic_messages function."""
 
-    def test_converts_simple_user_message(self):
+    async def test_converts_simple_user_message(self):
         """
         What it does: Verifies conversion of simple user message.
         Purpose: Ensure basic user message is converted to UnifiedMessage.
@@ -960,7 +960,7 @@ class TestConvertAnthropicMessages:
         messages = [AnthropicMessage(role="user", content="Hello!")]
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(f"Result: {result}")
         assert len(result) == 1
@@ -969,7 +969,7 @@ class TestConvertAnthropicMessages:
         assert result[0].tool_calls is None
         assert result[0].tool_results is None
 
-    def test_converts_simple_assistant_message(self):
+    async def test_converts_simple_assistant_message(self):
         """
         What it does: Verifies conversion of simple assistant message.
         Purpose: Ensure basic assistant message is converted to UnifiedMessage.
@@ -978,14 +978,14 @@ class TestConvertAnthropicMessages:
         messages = [AnthropicMessage(role="assistant", content="Hi there!")]
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(f"Result: {result}")
         assert len(result) == 1
         assert result[0].role == "assistant"
         assert result[0].content == "Hi there!"
 
-    def test_converts_user_message_with_content_blocks(self):
+    async def test_converts_user_message_with_content_blocks(self):
         """
         What it does: Verifies conversion of user message with content blocks.
         Purpose: Ensure multimodal content is handled.
@@ -1002,13 +1002,13 @@ class TestConvertAnthropicMessages:
         ]
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(f"Result: {result}")
         assert len(result) == 1
         assert result[0].content == "Part 1 Part 2"
 
-    def test_converts_assistant_message_with_tool_use(self):
+    async def test_converts_assistant_message_with_tool_use(self):
         """
         What it does: Verifies conversion of assistant message with tool_use.
         Purpose: Ensure tool_use blocks are extracted as tool_calls.
@@ -1030,7 +1030,7 @@ class TestConvertAnthropicMessages:
         ]
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(f"Result: {result}")
         assert len(result) == 1
@@ -1040,7 +1040,7 @@ class TestConvertAnthropicMessages:
         assert len(result[0].tool_calls) == 1
         assert result[0].tool_calls[0]["function"]["name"] == "get_weather"
 
-    def test_converts_user_message_with_tool_result(self):
+    async def test_converts_user_message_with_tool_result(self):
         """
         What it does: Verifies conversion of user message with tool_result.
         Purpose: Ensure tool_result blocks are extracted as tool_results.
@@ -1060,7 +1060,7 @@ class TestConvertAnthropicMessages:
         ]
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(f"Result: {result}")
         assert len(result) == 1
@@ -1069,7 +1069,7 @@ class TestConvertAnthropicMessages:
         assert len(result[0].tool_results) == 1
         assert result[0].tool_results[0]["tool_use_id"] == "call_123"
 
-    def test_converts_full_conversation(self):
+    async def test_converts_full_conversation(self):
         """
         What it does: Verifies conversion of full conversation.
         Purpose: Ensure multi-turn conversation is converted correctly.
@@ -1082,7 +1082,7 @@ class TestConvertAnthropicMessages:
         ]
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(f"Result: {result}")
         assert len(result) == 3
@@ -1090,7 +1090,7 @@ class TestConvertAnthropicMessages:
         assert result[1].role == "assistant"
         assert result[2].role == "user"
 
-    def test_handles_empty_messages_list(self):
+    async def test_handles_empty_messages_list(self):
         """
         What it does: Verifies handling of empty messages list.
         Purpose: Ensure empty list returns empty list.
@@ -1099,7 +1099,7 @@ class TestConvertAnthropicMessages:
         messages = []
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
@@ -1108,7 +1108,7 @@ class TestConvertAnthropicMessages:
     # Image extraction tests (Issue #30 fix)
     # ==================================================================================
 
-    def test_extracts_images_from_user_message(self):
+    async def test_extracts_images_from_user_message(self):
         """
         What it does: Verifies that images are extracted from user messages.
         Purpose: Ensure Anthropic image content blocks are converted to unified format.
@@ -1137,7 +1137,7 @@ class TestConvertAnthropicMessages:
         ]
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(f"Result: {result}")
         print(f"Images: {result[0].images}")
@@ -1163,7 +1163,7 @@ class TestConvertAnthropicMessages:
         )
         assert image["data"] == test_image_base64
 
-    def test_images_only_extracted_from_user_role(self):
+    async def test_images_only_extracted_from_user_role(self):
         """
         What it does: Verifies that images are only extracted from user messages.
         Purpose: Ensure assistant messages don't have images extracted (they shouldn't contain images).
@@ -1190,7 +1190,7 @@ class TestConvertAnthropicMessages:
         ]
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(f"Result: {result}")
 
@@ -1203,7 +1203,7 @@ class TestConvertAnthropicMessages:
             "Assistant messages should not have images extracted"
         )
 
-    def test_extracts_multiple_images_from_user_message(self):
+    async def test_extracts_multiple_images_from_user_message(self):
         """
         What it does: Verifies extraction of multiple images from a single user message.
         Purpose: Ensure all images in a message are extracted.
@@ -1245,7 +1245,7 @@ class TestConvertAnthropicMessages:
         ]
 
         print("Action: Converting messages...")
-        result = convert_anthropic_messages(messages)
+        result = await convert_anthropic_messages(messages)
 
         print(
             f"Result images count: {len(result[0].images) if result[0].images else 0}"
@@ -1263,7 +1263,7 @@ class TestConvertAnthropicMessages:
         assert "image/png" in media_types
         assert "image/webp" in media_types
 
-    def test_counts_images_in_debug_log(self, caplog):
+    async def test_counts_images_in_debug_log(self, caplog):
         """
         What it does: Verifies that image count is logged in debug message.
         Purpose: Ensure logging includes image statistics for debugging.
@@ -1300,7 +1300,7 @@ class TestConvertAnthropicMessages:
 
         print("Action: Converting messages with logging enabled...")
         with caplog.at_level(logging.DEBUG):
-            result = convert_anthropic_messages(messages)
+            result = await convert_anthropic_messages(messages)
 
         print(f"Log records: {[r.message for r in caplog.records]}")
 
@@ -1449,7 +1449,7 @@ class TestConvertAnthropicTools:
 class TestAnthropicToKiro:
     """Tests for anthropic_to_kiro function - main entry point."""
 
-    def test_builds_simple_payload(self):
+    async def test_builds_simple_payload(self):
         """
         What it does: Verifies building of simple Kiro payload.
         Purpose: Ensure basic request is converted correctly.
@@ -1467,7 +1467,7 @@ class TestAnthropicToKiro:
             return_value="claude-sonnet-4.5",
         ):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
-                result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+                result = await anthropic_to_kiro(request, "conv-123", "arn:aws:test")
 
         print(f"Result: {result}")
         assert "conversationState" in result
@@ -1476,7 +1476,7 @@ class TestAnthropicToKiro:
         assert "userInputMessage" in result["conversationState"]["currentMessage"]
         assert result["profileArn"] == "arn:aws:test"
 
-    def test_includes_system_prompt(self):
+    async def test_includes_system_prompt(self):
         """
         What it does: Verifies that system prompt is included.
         Purpose: Ensure Anthropic's separate system field is handled.
@@ -1495,7 +1495,7 @@ class TestAnthropicToKiro:
             return_value="claude-sonnet-4.5",
         ):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
-                result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+                result = await anthropic_to_kiro(request, "conv-123", "arn:aws:test")
 
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"][
@@ -1504,7 +1504,7 @@ class TestAnthropicToKiro:
         print(f"Current content: {current_content}")
         assert "You are a helpful assistant." in current_content
 
-    def test_includes_tools(self):
+    async def test_includes_tools(self):
         """
         What it does: Verifies that tools are included in payload.
         Purpose: Ensure Anthropic tools are converted to Kiro format.
@@ -1532,7 +1532,7 @@ class TestAnthropicToKiro:
             return_value="claude-sonnet-4.5",
         ):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
-                result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+                result = await anthropic_to_kiro(request, "conv-123", "arn:aws:test")
 
         print(f"Result: {result}")
         context = result["conversationState"]["currentMessage"]["userInputMessage"].get(
@@ -1543,7 +1543,7 @@ class TestAnthropicToKiro:
         assert len(tools) == 1
         assert tools[0]["toolSpecification"]["name"] == "get_weather"
 
-    def test_builds_history_for_multi_turn(self):
+    async def test_builds_history_for_multi_turn(self):
         """
         What it does: Verifies building of history for multi-turn conversation.
         Purpose: Ensure conversation history is included in payload.
@@ -1565,7 +1565,7 @@ class TestAnthropicToKiro:
             return_value="claude-sonnet-4.5",
         ):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
-                result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+                result = await anthropic_to_kiro(request, "conv-123", "arn:aws:test")
 
         print(f"Result: {result}")
         history = result["conversationState"].get("history", [])
@@ -1574,7 +1574,7 @@ class TestAnthropicToKiro:
         assert "userInputMessage" in history[0]
         assert "assistantResponseMessage" in history[1]
 
-    def test_handles_tool_use_and_result_flow(self):
+    async def test_handles_tool_use_and_result_flow(self):
         """
         What it does: Verifies handling of tool use and result flow.
         Purpose: Ensure full tool flow is converted correctly.
@@ -1627,7 +1627,7 @@ class TestAnthropicToKiro:
             return_value="claude-sonnet-4.5",
         ):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
-                result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+                result = await anthropic_to_kiro(request, "conv-123", "arn:aws:test")
 
         print(f"Result: {result}")
 
@@ -1664,7 +1664,7 @@ class TestAnthropicToKiro:
 
         print("ValidationError raised as expected - Pydantic rejects empty messages")
 
-    def test_injects_thinking_tags_when_enabled(self):
+    async def test_injects_thinking_tags_when_enabled(self):
         """
         What it does: Verifies that thinking tags are injected when enabled.
         Purpose: Ensure fake reasoning feature works with Anthropic API.
@@ -1683,7 +1683,7 @@ class TestAnthropicToKiro:
         ):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
                 with patch("kiro.converters_core.FAKE_REASONING_MAX_TOKENS", 4000):
-                    result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+                    result = await anthropic_to_kiro(request, "conv-123", "arn:aws:test")
 
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"][
@@ -1695,7 +1695,7 @@ class TestAnthropicToKiro:
         assert "<thinking_mode>enabled</thinking_mode>" in current_content
         assert "What is 2+2?" in current_content
 
-    def test_injects_thinking_tags_even_when_tool_results_present(self):
+    async def test_injects_thinking_tags_even_when_tool_results_present(self):
         """
         What it does: Verifies that thinking tags ARE injected even when tool results are present.
         Purpose: Extended thinking should work in all scenarios including tool use flows.
@@ -1733,7 +1733,7 @@ class TestAnthropicToKiro:
         ):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
                 with patch("kiro.converters_core.FAKE_REASONING_MAX_TOKENS", 4000):
-                    result = anthropic_to_kiro(request, "conv-123", "arn:aws:test")
+                    result = await anthropic_to_kiro(request, "conv-123", "arn:aws:test")
 
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"][
@@ -1989,7 +1989,7 @@ class TestExtractThinkingConfigFromAnthropic:
 class TestAnthropicToKiroIntegration:
     """Integration tests for anthropic_to_kiro with thinking config."""
 
-    def test_extracts_and_passes_thinking_config(self):
+    async def test_extracts_and_passes_thinking_config(self):
         """
         What it does: Verifies anthropic_to_kiro extracts thinking_config and passes to core
         Purpose: Ensure end-to-end thinking configuration flow works
@@ -2006,7 +2006,7 @@ class TestAnthropicToKiroIntegration:
         with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-sonnet-4.5"):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
                 with patch("kiro.converters_core.FAKE_REASONING_BUDGET_CAP", 10000):
-                    payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+                    payload = await anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
 
         print("Extracting userInputMessage content...")
         user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
@@ -2016,7 +2016,7 @@ class TestAnthropicToKiroIntegration:
         assert "<max_thinking_length>6000</max_thinking_length>" in content
         assert "<thinking_mode>enabled</thinking_mode>" in content
 
-    def test_adaptive_thinking_forwards_native_fields(self):
+    async def test_adaptive_thinking_forwards_native_fields(self):
         """
         What it does: Verifies adaptive thinking on a supported model produces native fields
         Purpose: Adaptive thinking is forwarded verbatim, never converted to a budget
@@ -2032,7 +2032,7 @@ class TestAnthropicToKiroIntegration:
 
         print("Calling anthropic_to_kiro...")
         with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
-            payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+            payload = await anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
 
         print("Checking native fields...")
         assert payload["additionalModelRequestFields"] == {
@@ -2046,7 +2046,7 @@ class TestAnthropicToKiroIntegration:
         assert "<max_thinking_length>" not in content
         assert "<thinking_effort>" not in content
 
-    def test_adaptive_thinking_unsupported_model_omits_fields(self):
+    async def test_adaptive_thinking_unsupported_model_omits_fields(self):
         """
         What it does: Verifies adaptive thinking on an unsupported model sends nothing
         Purpose: Never fabricate a numeric budget for models without a native channel
@@ -2063,7 +2063,7 @@ class TestAnthropicToKiroIntegration:
         print("Calling anthropic_to_kiro...")
         with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-sonnet-4.5"):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
-                payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+                payload = await anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
 
         print("Checking no native fields were fabricated...")
         assert "additionalModelRequestFields" not in payload
@@ -2073,7 +2073,7 @@ class TestAnthropicToKiroIntegration:
         assert "<thinking_mode>" not in content
         assert "<max_thinking_length>" not in content
 
-    def test_native_effort_coexists_with_tool_choice_directive(self):
+    async def test_native_effort_coexists_with_tool_choice_directive(self):
         """
         What it does: Verifies a named tool_choice directive and native effort both apply
         Purpose: Ensure the directive system prompt and native fields do not conflict
@@ -2095,7 +2095,7 @@ class TestAnthropicToKiroIntegration:
 
         print("Calling anthropic_to_kiro...")
         with patch("kiro.converters_core.FAKE_REASONING_ENABLED", True):
-            payload = anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
+            payload = await anthropic_to_kiro(request, "test-conv-123", "arn:aws:test")
 
         print("Checking native effort fragment...")
         assert payload["additionalModelRequestFields"]["output_config"] == {"effort": "medium"}
@@ -2108,7 +2108,7 @@ class TestAnthropicToKiroIntegration:
 class TestStrictAnthropicToolChoiceIntegration:
     """Tests for strict Anthropic tool-choice payload integration."""
 
-    def test_named_choice_filters_payload_tools(self):
+    async def test_named_choice_filters_payload_tools(self):
         request = AnthropicMessagesRequest(
             model="claude-sonnet-4.5",
             messages=[AnthropicMessage(role="user", content="Run the command")],
@@ -2121,7 +2121,7 @@ class TestStrictAnthropicToolChoiceIntegration:
         )
 
         policy, selected, allowed = resolve_anthropic_tool_choice(request)
-        payload = anthropic_to_kiro(request, "strict-anthropic", "")
+        payload = await anthropic_to_kiro(request, "strict-anthropic", "")
         user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
         specifications = user_input["userInputMessageContext"]["tools"]
 
@@ -2249,13 +2249,13 @@ class TestGptEditRecovery:
             assert "Claude Code Edit Recovery" in recovered_directive
             assert "[Edit Recovery Notice]" not in recovered_directive
 
-    def _history_text(self, request):
+    async def _history_text(self, request):
         with patch(
             "kiro.converters_anthropic.get_model_id_for_kiro",
             return_value="gpt-5.6-luna",
         ):
             with patch("kiro.converters_core.FAKE_REASONING_ENABLED", False):
-                result = anthropic_to_kiro(request, "conv-edit", "arn:aws:test")
+                result = await anthropic_to_kiro(request, "conv-edit", "arn:aws:test")
 
         history = result["conversationState"].get("history", [])
         return "\n".join(
@@ -2264,7 +2264,7 @@ class TestGptEditRecovery:
             if "userInputMessage" in item
         )
 
-    def test_anthropic_payload_contains_gpt_recovery_directive(self):
+    async def test_anthropic_payload_contains_gpt_recovery_directive(self):
         request = AnthropicMessagesRequest(
             model="gpt-5.6-luna",
             messages=self._messages(),
@@ -2273,13 +2273,13 @@ class TestGptEditRecovery:
         )
 
         with patch("kiro.converters_anthropic.GPT_EDIT_RECOVERY", True):
-            history_text = self._history_text(request)
+            history_text = await self._history_text(request)
 
         assert "Existing system instructions." in history_text
         assert "Claude Code Edit Recovery" in history_text
         assert "[Edit Recovery Notice]" in history_text
 
-    def test_anthropic_payload_untouched_when_disabled(self):
+    async def test_anthropic_payload_untouched_when_disabled(self):
         """With the flag off, the client's system prompt must pass through intact."""
         request = AnthropicMessagesRequest(
             model="gpt-5.6-luna",
@@ -2288,7 +2288,7 @@ class TestGptEditRecovery:
             system="Existing system instructions.",
         )
 
-        history_text = self._history_text(request)
+        history_text = await self._history_text(request)
 
         assert "Existing system instructions." in history_text
         assert "Claude Code Edit Recovery" not in history_text

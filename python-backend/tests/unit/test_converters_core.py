@@ -11,10 +11,13 @@ Tests for shared conversion logic used by both OpenAI and Anthropic adapters:
 - Thinking tag injection
 """
 
+import base64
 import json
 import os
 import pytest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 from kiro.converters_core import (
     extract_text_content,
@@ -320,7 +323,7 @@ class TestExtractImagesFromContent:
     This is a critical function for Issue #30 fix - 422 Validation Error for image content blocks.
     """
     
-    def test_extracts_from_openai_format_data_url(self):
+    async def test_extracts_from_openai_format_data_url(self):
         """
         What it does: Verifies extraction from OpenAI image_url format with data URL.
         Purpose: Ensure OpenAI Vision API format is handled correctly.
@@ -337,7 +340,7 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Result: {result}")
         print(f"Comparing count: Expected 1, Got {len(result)}")
@@ -349,7 +352,7 @@ class TestExtractImagesFromContent:
         print("Checking data...")
         assert result[0]["data"] == TEST_IMAGE_BASE64
     
-    def test_extracts_from_anthropic_format_base64(self):
+    async def test_extracts_from_anthropic_format_base64(self):
         """
         What it does: Verifies extraction from Anthropic image format with base64 source.
         Purpose: Ensure Anthropic Messages API format is handled correctly.
@@ -370,7 +373,7 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Result: {result}")
         print(f"Comparing count: Expected 1, Got {len(result)}")
@@ -382,7 +385,7 @@ class TestExtractImagesFromContent:
         print("Checking data...")
         assert result[0]["data"] == TEST_IMAGE_BASE64
     
-    def test_extracts_from_mixed_content(self):
+    async def test_extracts_from_mixed_content(self):
         """
         What it does: Verifies extraction from mixed content (text + multiple images).
         Purpose: Ensure all images are extracted from multimodal content.
@@ -402,7 +405,7 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Result: {result}")
         print(f"Comparing count: Expected 2, Got {len(result)}")
@@ -416,7 +419,7 @@ class TestExtractImagesFromContent:
         assert result[1]["media_type"] == "image/png"
         assert result[1]["data"] == "image2_data"
     
-    def test_returns_empty_for_string_content(self):
+    async def test_returns_empty_for_string_content(self):
         """
         What it does: Verifies empty list return for string content.
         Purpose: Ensure string content doesn't contain images.
@@ -425,12 +428,12 @@ class TestExtractImagesFromContent:
         content = "Just a text message"
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
     
-    def test_returns_empty_for_empty_content(self):
+    async def test_returns_empty_for_empty_content(self):
         """
         What it does: Verifies empty list return for empty content.
         Purpose: Ensure empty list returns empty list.
@@ -439,12 +442,12 @@ class TestExtractImagesFromContent:
         content = []
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
     
-    def test_returns_empty_for_none_content(self):
+    async def test_returns_empty_for_none_content(self):
         """
         What it does: Verifies empty list return for None content.
         Purpose: Ensure None doesn't cause errors.
@@ -453,12 +456,12 @@ class TestExtractImagesFromContent:
         content = None
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
     
-    def test_returns_empty_for_text_only_content(self):
+    async def test_returns_empty_for_text_only_content(self):
         """
         What it does: Verifies empty list return for text-only content.
         Purpose: Ensure text blocks don't produce images.
@@ -470,38 +473,59 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
     
-    def test_handles_url_images_with_warning(self):
+    async def test_skips_openai_url_image_when_fetch_disabled(self):
         """
-        What it does: Verifies URL-based images are skipped with warning.
-        Purpose: Ensure URL images don't crash but are logged as unsupported.
-        
-        URL-based images require fetching and are not supported by Kiro API directly.
+        What it does: Verifies OpenAI URL images are skipped when fetching is off.
+        Purpose: Preserve the documented opt-out behavior of FETCH_IMAGE_URLS.
         """
-        print("Setup: URL-based image content...")
+        print("Setup: URL-based image content, FETCH_IMAGE_URLS disabled...")
         content = [
             {
                 "type": "image_url",
                 "image_url": {"url": "https://example.com/image.jpg"}
             }
         ]
-        
+
         print("Action: Extracting images (should skip URL images)...")
-        result = extract_images_from_content(content)
-        
+        with patch("kiro.converters_core.FETCH_IMAGE_URLS", False):
+            result = await extract_images_from_content(content)
+
         print(f"Comparing result: Expected [], Got {result}")
-        assert result == []  # URL images are skipped
-    
-    def test_handles_anthropic_url_source_with_warning(self):
+        assert result == []
+
+    async def test_fetches_openai_url_image_when_enabled(self):
         """
-        What it does: Verifies Anthropic URL source images are skipped with warning.
-        Purpose: Ensure Anthropic URL format doesn't crash but is logged as unsupported.
+        What it does: Verifies OpenAI URL images are fetched and inlined as base64.
+        Purpose: Kiro API only accepts base64, so the gateway must fetch URL images.
         """
-        print("Setup: Anthropic URL source image...")
+        from unittest.mock import AsyncMock
+
+        print("Setup: URL-based image content, FETCH_IMAGE_URLS enabled...")
+        url = "https://example.com/image.jpg"
+        content = [{"type": "image_url", "image_url": {"url": url}}]
+        fetched = {"media_type": "image/jpeg", "data": "ZmFrZS1qcGVn"}
+
+        print("Action: Extracting images with a mocked fetcher...")
+        mock_fetch = AsyncMock(return_value=fetched)
+        with patch("kiro.converters_core.FETCH_IMAGE_URLS", True):
+            with patch("kiro.converters_core.fetch_image_as_base64", mock_fetch):
+                result = await extract_images_from_content(content)
+
+        print(f"Comparing result: Expected [{fetched}], Got {result}")
+        assert result == [fetched]
+        mock_fetch.assert_awaited_once_with(url)
+
+    async def test_skips_anthropic_url_source_when_fetch_disabled(self):
+        """
+        What it does: Verifies Anthropic URL source images are skipped when off.
+        Purpose: Preserve the documented opt-out behavior for the Anthropic format.
+        """
+        print("Setup: Anthropic URL source image, FETCH_IMAGE_URLS disabled...")
         content = [
             {
                 "type": "image",
@@ -511,14 +535,37 @@ class TestExtractImagesFromContent:
                 }
             }
         ]
-        
+
         print("Action: Extracting images (should skip URL images)...")
-        result = extract_images_from_content(content)
-        
+        with patch("kiro.converters_core.FETCH_IMAGE_URLS", False):
+            result = await extract_images_from_content(content)
+
         print(f"Comparing result: Expected [], Got {result}")
-        assert result == []  # URL images are skipped
+        assert result == []
+
+    async def test_fetches_anthropic_url_source_when_enabled(self):
+        """
+        What it does: Verifies Anthropic URL source images are fetched as base64.
+        Purpose: Both API surfaces must inline URL images, not just OpenAI.
+        """
+        from unittest.mock import AsyncMock
+
+        print("Setup: Anthropic URL source image, FETCH_IMAGE_URLS enabled...")
+        url = "https://example.com/image.png"
+        content = [{"type": "image", "source": {"type": "url", "url": url}}]
+        fetched = {"media_type": "image/png", "data": "ZmFrZS1wbmc="}
+
+        print("Action: Extracting images with a mocked fetcher...")
+        mock_fetch = AsyncMock(return_value=fetched)
+        with patch("kiro.converters_core.FETCH_IMAGE_URLS", True):
+            with patch("kiro.converters_core.fetch_image_as_base64", mock_fetch):
+                result = await extract_images_from_content(content)
+
+        print(f"Comparing result: Expected [{fetched}], Got {result}")
+        assert result == [fetched]
+        mock_fetch.assert_awaited_once_with(url)
     
-    def test_handles_invalid_data_url(self):
+    async def test_handles_invalid_data_url(self):
         """
         What it does: Verifies handling of invalid data URL format.
         Purpose: Ensure malformed data URLs don't crash the function.
@@ -532,12 +579,12 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images (should handle gracefully)...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []  # Invalid data URL is skipped
     
-    def test_handles_empty_data_in_image(self):
+    async def test_handles_empty_data_in_image(self):
         """
         What it does: Verifies handling of image with empty data.
         Purpose: Ensure images with empty data are skipped.
@@ -551,12 +598,12 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []  # Empty data is skipped
     
-    def test_extracts_from_pydantic_image_content_block(self):
+    async def test_extracts_from_pydantic_image_content_block(self):
         """
         What it does: Verifies extraction from Pydantic ImageContentBlock objects.
         Purpose: Ensure Pydantic models are handled correctly (Issue #30 fix).
@@ -579,7 +626,7 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Result: {result}")
         print(f"Comparing count: Expected 1, Got {len(result)}")
@@ -591,14 +638,14 @@ class TestExtractImagesFromContent:
         print("Checking data...")
         assert result[0]["data"] == TEST_IMAGE_BASE64
     
-    def test_extracts_from_pydantic_url_image_source(self):
+    async def test_skips_pydantic_url_image_source_when_fetch_disabled(self):
         """
-        What it does: Verifies handling of Pydantic URLImageSource objects.
-        Purpose: Ensure Pydantic URL sources are skipped with warning.
+        What it does: Verifies Pydantic URLImageSource is skipped when fetching is off.
+        Purpose: The opt-out must apply to Pydantic models, not just plain dicts.
         """
         from kiro.models_anthropic import ImageContentBlock, URLImageSource
         
-        print("Setup: Pydantic ImageContentBlock with URL source...")
+        print("Setup: Pydantic ImageContentBlock with URL source, fetching disabled...")
         content = [
             ImageContentBlock(
                 type="image",
@@ -610,12 +657,41 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images (should skip URL images)...")
-        result = extract_images_from_content(content)
+        with patch("kiro.converters_core.FETCH_IMAGE_URLS", False):
+            result = await extract_images_from_content(content)
         
         print(f"Comparing result: Expected [], Got {result}")
-        assert result == []  # URL images are skipped
+        assert result == []
+
+    async def test_fetches_pydantic_url_image_source_when_enabled(self):
+        """
+        What it does: Verifies Pydantic URLImageSource images are fetched as base64.
+        Purpose: The Pydantic branch must fetch too, or typed clients silently lose images.
+        """
+        from unittest.mock import AsyncMock
+        from kiro.models_anthropic import ImageContentBlock, URLImageSource
+
+        print("Setup: Pydantic ImageContentBlock with URL source, fetching enabled...")
+        url = "https://example.com/image.gif"
+        content = [
+            ImageContentBlock(
+                type="image",
+                source=URLImageSource(type="url", url=url)
+            )
+        ]
+        fetched = {"media_type": "image/gif", "data": "ZmFrZS1naWY="}
+
+        print("Action: Extracting images with a mocked fetcher...")
+        mock_fetch = AsyncMock(return_value=fetched)
+        with patch("kiro.converters_core.FETCH_IMAGE_URLS", True):
+            with patch("kiro.converters_core.fetch_image_as_base64", mock_fetch):
+                result = await extract_images_from_content(content)
+
+        print(f"Comparing result: Expected [{fetched}], Got {result}")
+        assert result == [fetched]
+        mock_fetch.assert_awaited_once_with(url)
     
-    def test_extracts_multiple_formats_mixed(self):
+    async def test_extracts_multiple_formats_mixed(self):
         """
         What it does: Verifies extraction from mixed OpenAI and Anthropic formats.
         Purpose: Ensure both formats can coexist in the same content list.
@@ -635,7 +711,7 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Result: {result}")
         print(f"Comparing count: Expected 2, Got {len(result)}")
@@ -649,7 +725,7 @@ class TestExtractImagesFromContent:
         assert result[1]["media_type"] == "image/png"
         assert result[1]["data"] == "anthropic_image_data"
     
-    def test_handles_missing_source_in_anthropic_format(self):
+    async def test_handles_missing_source_in_anthropic_format(self):
         """
         What it does: Verifies handling of Anthropic image without source.
         Purpose: Ensure malformed Anthropic images don't crash.
@@ -660,12 +736,12 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
     
-    def test_handles_missing_image_url_in_openai_format(self):
+    async def test_handles_missing_image_url_in_openai_format(self):
         """
         What it does: Verifies handling of OpenAI image_url without image_url field.
         Purpose: Ensure malformed OpenAI images don't crash.
@@ -676,12 +752,12 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
     
-    def test_extracts_gif_format(self):
+    async def test_extracts_gif_format(self):
         """
         What it does: Verifies extraction of GIF images.
         Purpose: Ensure GIF format is supported.
@@ -695,13 +771,13 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Result: {result}")
         assert len(result) == 1
         assert result[0]["media_type"] == "image/gif"
     
-    def test_extracts_webp_format(self):
+    async def test_extracts_webp_format(self):
         """
         What it does: Verifies extraction of WebP images.
         Purpose: Ensure WebP format is supported.
@@ -715,13 +791,13 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Result: {result}")
         assert len(result) == 1
         assert result[0]["media_type"] == "image/webp"
     
-    def test_uses_default_media_type_when_missing(self):
+    async def test_uses_default_media_type_when_missing(self):
         """
         What it does: Verifies default media_type is used when not specified.
         Purpose: Ensure missing media_type defaults to image/jpeg.
@@ -735,11 +811,532 @@ class TestExtractImagesFromContent:
         ]
         
         print("Action: Extracting images...")
-        result = extract_images_from_content(content)
+        result = await extract_images_from_content(content)
         
         print(f"Result: {result}")
         assert len(result) == 1
         assert result[0]["media_type"] == "image/jpeg"  # Default
+
+
+# ==================================================================================================
+# Tests for fetch_image_as_base64 (SSRF-hardened URL fetching)
+# ==================================================================================================
+
+def _make_httpx_mock(status_code=200, headers=None, chunks=(b"fake-bytes",), raise_exc=None):
+    """
+    Builds a Mock standing in for httpx.AsyncClient for fetch_image_as_base64.
+
+    Real httpx returns a context manager from stream() directly (not a coroutine),
+    so stream must be a plain Mock, not an AsyncMock.
+    """
+    from unittest.mock import Mock
+
+    response = Mock()
+    response.status_code = status_code
+    response.headers = dict(headers or {"content-type": "image/jpeg"})
+
+    async def _aiter_bytes():
+        for chunk in chunks:
+            yield chunk
+
+    response.aiter_bytes = _aiter_bytes
+
+    class StreamCtx:
+        async def __aenter__(self):
+            if raise_exc is not None:
+                raise raise_exc
+            return response
+
+        async def __aexit__(self, *args):
+            return None
+
+    client = Mock()
+    client.stream = Mock(return_value=StreamCtx())
+
+    class ClientCtx:
+        async def __aenter__(self):
+            return client
+
+        async def __aexit__(self, *args):
+            return None
+
+    return Mock(return_value=ClientCtx()), client
+
+
+def _getaddrinfo_returning(ip):
+    """Builds a socket.getaddrinfo stand-in that resolves any host to one IP."""
+    import socket as _socket
+
+    def _fake(host, port, *args, **kwargs):
+        return [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    return _fake
+
+
+class TestFetchImageAsBase64:
+    """
+    Tests for fetch_image_as_base64.
+
+    The helper fetches a client-supplied image URL server-side. Because the URL
+    comes from an authenticated but untrusted caller, SSRF protection is
+    unconditional. The helper must never raise: every rejection returns None.
+
+    Every test patches both socket.getaddrinfo and httpx.AsyncClient so no test
+    performs real DNS or real HTTP. The httpx patch also overrides the global
+    network-blocking fixture in conftest.py.
+    """
+
+    async def test_successful_fetch_returns_base64(self):
+        from kiro.converters_core import fetch_image_as_base64
+
+        print("Setup: public IP, 200 response with two chunks...")
+        client_cls, _ = _make_httpx_mock(
+            headers={"content-type": "image/png; charset=binary"},
+            chunks=(b"abc", b"def"),
+        )
+
+        with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("93.184.216.34")):
+            with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                result = await fetch_image_as_base64("https://cdn.example.com/i.png")
+
+        print(f"Result: {result}")
+        assert result == {"media_type": "image/png", "data": base64.b64encode(b"abcdef").decode("ascii")}
+
+    async def test_rejects_non_http_scheme_without_connecting(self):
+        from kiro.converters_core import fetch_image_as_base64
+
+        print("Setup: ftp:// URL...")
+        client_cls, _ = _make_httpx_mock()
+
+        with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+            result = await fetch_image_as_base64("ftp://example.com/i.png")
+
+        assert result is None
+        print("Checking no HTTP client was constructed...")
+        client_cls.assert_not_called()
+
+    @pytest.mark.parametrize("blocked_ip", ["10.0.0.1", "127.0.0.1", "169.254.169.254", "192.168.1.1"])
+    async def test_rejects_internal_ips_without_connecting(self, blocked_ip):
+        from kiro.converters_core import fetch_image_as_base64
+
+        print(f"Setup: hostname resolving to {blocked_ip}...")
+        client_cls, _ = _make_httpx_mock()
+
+        with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning(blocked_ip)):
+            with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                result = await fetch_image_as_base64("https://internal.example.com/i.png")
+
+        assert result is None
+        print("Checking no HTTP request was made...")
+        client_cls.assert_not_called()
+
+    async def test_rejects_ipv4_mapped_ipv6_metadata_address(self):
+        """An IPv4-mapped IPv6 form must not bypass the private-range check."""
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock()
+
+        with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("::ffff:169.254.169.254")):
+            with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                result = await fetch_image_as_base64("https://sneaky.example.com/i.png")
+
+        assert result is None
+        client_cls.assert_not_called()
+
+    async def test_returns_none_on_dns_failure(self):
+        from kiro.converters_core import fetch_image_as_base64
+        import socket as _socket
+
+        def _boom(host, port, *args, **kwargs):
+            raise _socket.gaierror("name resolution failed")
+
+        client_cls, _ = _make_httpx_mock()
+
+        with patch("kiro.converters_core.socket.getaddrinfo", _boom):
+            with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                result = await fetch_image_as_base64("https://nonexistent.example.com/i.png")
+
+        assert result is None
+        client_cls.assert_not_called()
+
+    async def test_redirect_is_not_followed(self):
+        """follow_redirects=False means a 302 cannot be used to reach a blocked IP."""
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock(
+            status_code=302,
+            headers={"location": "http://169.254.169.254/latest/meta-data/"},
+        )
+
+        with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("93.184.216.34")):
+            with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                result = await fetch_image_as_base64("https://cdn.example.com/i.png")
+
+        print(f"Result: {result}")
+        assert result is None
+
+    async def test_rejects_non_200_status(self):
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock(status_code=404)
+
+        with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("93.184.216.34")):
+            with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                result = await fetch_image_as_base64("https://cdn.example.com/missing.png")
+
+        assert result is None
+
+    async def test_rejects_oversized_declared_content_length(self):
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock(
+            headers={"content-type": "image/jpeg", "content-length": "999999"},
+        )
+
+        with patch("kiro.converters_core.FETCH_IMAGE_URL_MAX_BYTES", 100):
+            with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("93.184.216.34")):
+                with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                    result = await fetch_image_as_base64("https://cdn.example.com/huge.jpg")
+
+        assert result is None
+
+    async def test_rejects_oversized_stream_when_content_length_lies(self):
+        """A server understating Content-Length must still hit the streaming limit."""
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock(
+            headers={"content-type": "image/jpeg", "content-length": "10"},
+            chunks=(b"x" * 60, b"x" * 60),
+        )
+
+        with patch("kiro.converters_core.FETCH_IMAGE_URL_MAX_BYTES", 100):
+            with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("93.184.216.34")):
+                with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                    result = await fetch_image_as_base64("https://cdn.example.com/liar.jpg")
+
+        print(f"Result: {result}")
+        assert result is None
+
+    async def test_malformed_content_length_does_not_raise(self):
+        """A non-numeric Content-Length is ignored; the byte counter still guards."""
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock(
+            headers={"content-type": "image/jpeg", "content-length": "abc"},
+            chunks=(b"ok",),
+        )
+
+        with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("93.184.216.34")):
+            with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                result = await fetch_image_as_base64("https://cdn.example.com/i.jpg")
+
+        print(f"Result: {result}")
+        assert result == {"media_type": "image/jpeg", "data": base64.b64encode(b"ok").decode("ascii")}
+
+    async def test_malformed_url_returns_none(self):
+        """urlparse raises ValueError on this input; it must not escape."""
+        from kiro.converters_core import fetch_image_as_base64
+
+        result = await fetch_image_as_base64("http://[bad")
+
+        assert result is None
+
+    async def test_invalid_url_exception_is_caught(self):
+        """httpx.InvalidURL is not an httpx.HTTPError, so it needs its own catch."""
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock(raise_exc=httpx.InvalidURL("bad url"))
+
+        with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("93.184.216.34")):
+            with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                result = await fetch_image_as_base64("https://cdn.example.com/i.png")
+
+        assert result is None
+
+    async def test_allowlisted_host_skips_ip_check(self):
+        """
+        What it does: Verifies an allowlisted host is fetched despite a private IP.
+        Purpose: Under a fake-ip proxy every host resolves to a placeholder address,
+        so the hostname allowlist is the only workable escape hatch.
+        """
+        from unittest.mock import Mock
+        from kiro.converters_core import fetch_image_as_base64
+
+        print("Setup: allowlisted host resolving to a private placeholder IP...")
+        client_cls, _ = _make_httpx_mock(chunks=(b"img",))
+        spy_resolve = Mock(side_effect=AssertionError("getaddrinfo must not be called"))
+
+        with patch("kiro.converters_core.FETCH_IMAGE_URL_ALLOWED_HOSTS", ["cdn.example.com"]):
+            with patch("kiro.converters_core.socket.getaddrinfo", spy_resolve):
+                with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                    result = await fetch_image_as_base64("https://cdn.example.com/i.png")
+
+        print(f"Result: {result}")
+        assert result == {"media_type": "image/jpeg", "data": base64.b64encode(b"img").decode("ascii")}
+        print("Checking DNS resolution was short-circuited...")
+        spy_resolve.assert_not_called()
+
+    async def test_allowlist_match_is_case_insensitive_and_ignores_trailing_dot(self):
+        """"HOST." and "host" are the same name, so both must match the allowlist."""
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock(chunks=(b"img",))
+
+        with patch("kiro.converters_core.FETCH_IMAGE_URL_ALLOWED_HOSTS", ["cdn.example.com"]):
+            with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                result = await fetch_image_as_base64("https://CDN.Example.COM./i.png")
+
+        print(f"Result: {result}")
+        assert result is not None
+
+    async def test_non_allowlisted_host_with_private_ip_still_rejected(self):
+        """The allowlist must not weaken the default for hosts not on it."""
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock()
+
+        with patch("kiro.converters_core.FETCH_IMAGE_URL_ALLOWED_HOSTS", ["cdn.example.com"]):
+            with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("10.0.0.1")):
+                with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                    result = await fetch_image_as_base64("https://other.example.com/i.png")
+
+        assert result is None
+        client_cls.assert_not_called()
+
+    async def test_allowlisted_ip_range_permits_otherwise_blocked_address(self):
+        """An operator-configured CIDR overrides the private-range rejection."""
+        import ipaddress
+        from kiro.converters_core import fetch_image_as_base64
+
+        print("Setup: 198.18.0.0/15 allowlisted, host resolving inside it...")
+        client_cls, _ = _make_httpx_mock(chunks=(b"img",))
+
+        with patch("kiro.converters_core._ALLOWED_IP_NETWORKS", [ipaddress.ip_network("198.18.0.0/15")]):
+            with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("198.18.0.203")):
+                with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                    result = await fetch_image_as_base64("https://cdn.example.com/i.png")
+
+        print(f"Result: {result}")
+        assert result == {"media_type": "image/jpeg", "data": base64.b64encode(b"img").decode("ascii")}
+
+    async def test_ip_outside_allowlisted_range_still_blocked(self):
+        """The CIDR override is scoped: other private addresses stay blocked."""
+        import ipaddress
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock()
+
+        with patch("kiro.converters_core._ALLOWED_IP_NETWORKS", [ipaddress.ip_network("198.18.0.0/15")]):
+            with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("169.254.169.254")):
+                with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                    result = await fetch_image_as_base64("https://cdn.example.com/i.png")
+
+        assert result is None
+        client_cls.assert_not_called()
+
+    def test_invalid_cidr_entry_is_skipped_without_raising(self):
+        """One typo in the environment must not stop the gateway from starting."""
+        import ipaddress
+        from kiro.converters_core import _parse_allowed_ip_networks
+
+        print("Setup: one valid CIDR plus one nonsense entry...")
+        with patch(
+            "kiro.converters_core.FETCH_IMAGE_URL_ALLOWED_IP_RANGES",
+            ["198.18.0.0/15", "not-a-cidr"],
+        ):
+            networks = _parse_allowed_ip_networks()
+
+        print(f"Result: {networks}")
+        assert networks == [ipaddress.ip_network("198.18.0.0/15")]
+
+
+# ==================================================================================================
+# Tests for ImageFetchBudget
+# ==================================================================================================
+
+def _url_image_content(*urls):
+    """Builds Anthropic-format content blocks referencing the given image URLs."""
+    return [
+        {"type": "image", "source": {"type": "url", "url": url}}
+        for url in urls
+    ]
+
+
+class TestImageFetchBudget:
+    """
+    Tests for the per-request image fetch budget.
+
+    The budget exists to bound two amplification paths that a key-holding but
+    untrusted caller could otherwise abuse: repeated fetches of the same URL
+    (conversation history is re-converted on every turn) and an unbounded
+    number of distinct URLs in one request.
+    """
+
+    def test_shipped_defaults_fit_the_kiro_payload_budget(self):
+        """
+        What it does: Pins the shipped size and count defaults.
+        Purpose: A single image must be small enough to survive base64 expansion
+                 into KIRO_MAX_PAYLOAD_BYTES, and one request must not be able to
+                 trigger an unbounded number of outbound fetches.
+        """
+        from kiro.config import (
+            FETCH_IMAGE_URL_MAX_BYTES,
+            FETCH_IMAGE_URL_MAX_COUNT,
+            KIRO_MAX_PAYLOAD_BYTES,
+        )
+
+        print(f"Setup: max_bytes={FETCH_IMAGE_URL_MAX_BYTES}, payload={KIRO_MAX_PAYLOAD_BYTES}")
+        assert FETCH_IMAGE_URL_MAX_BYTES == 400000
+        assert FETCH_IMAGE_URL_MAX_COUNT == 10
+
+        # base64 inflates by ~4/3; the encoded image must still leave room for text.
+        encoded_size = FETCH_IMAGE_URL_MAX_BYTES * 4 / 3
+        print(f"Result: encoded worst case {encoded_size} vs payload {KIRO_MAX_PAYLOAD_BYTES}")
+        assert encoded_size < KIRO_MAX_PAYLOAD_BYTES
+
+    async def test_repeated_url_is_fetched_once(self):
+        """
+        What it does: Verifies the same URL mentioned twice costs one fetch.
+        Purpose: History is re-converted every turn, so without dedup a single
+                 image is re-downloaded for the whole life of a conversation.
+        """
+        from kiro.converters_core import ImageFetchBudget
+
+        print("Setup: budget with one URL requested twice...")
+        fetch = AsyncMock(return_value={"media_type": "image/png", "data": "abc"})
+        budget = ImageFetchBudget()
+
+        with patch("kiro.converters_core.fetch_image_as_base64", fetch):
+            first = await budget.fetch("https://cdn.test/a.png")
+            second = await budget.fetch("https://cdn.test/a.png")
+
+        print(f"Result: fetch calls={fetch.await_count}, count={budget.fetch_count}")
+        assert fetch.await_count == 1
+        assert budget.fetch_count == 1
+        assert first == second == {"media_type": "image/png", "data": "abc"}
+
+    async def test_failed_url_is_not_retried(self):
+        """
+        What it does: Verifies a failed fetch is cached as None.
+        Purpose: A broken URL repeated across history should consume exactly one
+                 unit of budget instead of being retried on every mention.
+        """
+        from kiro.converters_core import ImageFetchBudget
+
+        print("Setup: fetch always failing...")
+        fetch = AsyncMock(return_value=None)
+        budget = ImageFetchBudget()
+
+        with patch("kiro.converters_core.fetch_image_as_base64", fetch):
+            await budget.fetch("https://cdn.test/broken.png")
+            await budget.fetch("https://cdn.test/broken.png")
+
+        print(f"Result: fetch calls={fetch.await_count}")
+        assert fetch.await_count == 1
+
+    async def test_count_cap_refuses_extra_urls(self):
+        """
+        What it does: Verifies fetches stop once max_count distinct URLs are used.
+        Purpose: Bounds how long one request can occupy a worker with sequential
+                 outbound fetches.
+        """
+        from kiro.converters_core import ImageFetchBudget
+
+        print("Setup: budget capped at 2, three distinct URLs...")
+        fetch = AsyncMock(return_value={"media_type": "image/png", "data": "abc"})
+        budget = ImageFetchBudget(max_count=2)
+
+        with patch("kiro.converters_core.fetch_image_as_base64", fetch):
+            results = [
+                await budget.fetch(f"https://cdn.test/{i}.png")
+                for i in range(3)
+            ]
+
+        print(f"Result: fetch calls={fetch.await_count}, results={results}")
+        assert fetch.await_count == 2
+        assert results[2] is None
+
+    async def test_cap_applies_across_extraction_calls_sharing_a_budget(self):
+        """
+        What it does: Verifies the cap is scoped to the shared budget, not to one call.
+        Purpose: The cap must bound the whole request, so splitting URLs across
+                 several messages must not multiply the allowance.
+        """
+        from kiro.converters_core import ImageFetchBudget
+
+        print("Setup: budget capped at 2, two messages of two URLs each...")
+        fetch = AsyncMock(return_value={"media_type": "image/png", "data": "abc"})
+        budget = ImageFetchBudget(max_count=2)
+
+        with patch("kiro.converters_core.fetch_image_as_base64", fetch):
+            first = await extract_images_from_content(
+                _url_image_content("https://cdn.test/1.png", "https://cdn.test/2.png"),
+                budget,
+            )
+            second = await extract_images_from_content(
+                _url_image_content("https://cdn.test/3.png", "https://cdn.test/4.png"),
+                budget,
+            )
+
+        print(f"Result: fetch calls={fetch.await_count}, first={len(first)}, second={len(second)}")
+        assert fetch.await_count == 2
+        assert len(first) == 2
+        assert second == []
+
+    async def test_extraction_without_budget_is_still_capped(self):
+        """
+        What it does: Verifies a caller that passes no budget still gets one.
+        Purpose: Direct callers must not be able to bypass the cap by omitting
+                 the parameter.
+        """
+        print("Setup: no budget passed, three URLs, cap patched to 1...")
+        fetch = AsyncMock(return_value={"media_type": "image/png", "data": "abc"})
+
+        with patch("kiro.converters_core.FETCH_IMAGE_URL_MAX_COUNT", 1):
+            with patch("kiro.converters_core.fetch_image_as_base64", fetch):
+                images = await extract_images_from_content(
+                    _url_image_content(
+                        "https://cdn.test/1.png",
+                        "https://cdn.test/2.png",
+                        "https://cdn.test/3.png",
+                    )
+                )
+
+        print(f"Result: fetch calls={fetch.await_count}, images={len(images)}")
+        assert fetch.await_count == 1
+        assert len(images) == 1
+
+    async def test_payload_build_shares_one_budget_across_history_and_current(self):
+        """
+        What it does: Verifies build_kiro_payload dedups a URL repeated between
+                      a history message and the current message.
+        Purpose: History and the current message are extracted by different code
+                 paths; both must draw on the same request-scoped budget.
+        """
+        print("Setup: same image URL in a history message and the current message...")
+        fetch = AsyncMock(return_value={"media_type": "image/png", "data": "abc"})
+        repeated = "https://cdn.test/same.png"
+        messages = [
+            UnifiedMessage(role="user", content=_url_image_content(repeated)),
+            UnifiedMessage(role="assistant", content="ok"),
+            UnifiedMessage(role="user", content=_url_image_content(repeated)),
+        ]
+
+        with patch("kiro.converters_core.fetch_image_as_base64", fetch):
+            result = await build_kiro_payload(
+                messages=messages,
+                system_prompt="",
+                model_id="claude-sonnet-4",
+                tools=None,
+                conversation_id="conv-budget",
+                profile_arn="arn:aws:test",
+                thinking_config=ThinkingConfig(enabled=False),
+            )
+
+        print(f"Result: fetch calls={fetch.await_count}")
+        assert fetch.await_count == 1
+        # Both turns still carry the image; only the download was shared.
+        assert result.payload["conversationState"]["currentMessage"]["userInputMessage"]["images"]
 
 
 # ==================================================================================================
@@ -2121,7 +2718,7 @@ class TestRepairUnpairedToolUses:
         assert result[2].tool_results[0]["tool_use_id"] == "same"
         assert result[4].tool_results[0]["tool_use_id"] == "same"
 
-    def test_build_kiro_payload_includes_repair(self):
+    async def test_build_kiro_payload_includes_repair(self):
         """
         What it does: build_kiro_payload runs the repair; the synthetic result
         reaches the Kiro history/current toolResults.
@@ -2132,7 +2729,7 @@ class TestRepairUnpairedToolUses:
             UnifiedMessage(role="assistant", content="ok", tool_calls=[self._call("c1"), self._call("c2")]),
             UnifiedMessage(role="user", content="", tool_results=[self._result("c2")]),
         ]
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="gpt-5.6-terra",
@@ -4030,7 +4627,7 @@ class TestInjectThinkingTags:
 class TestBuildKiroHistory:
     """Tests for build_kiro_history function using UnifiedMessage."""
     
-    def test_builds_user_message(self):
+    async def test_builds_user_message(self):
         """
         What it does: Verifies building of user message.
         Purpose: Ensure user message is converted to userInputMessage.
@@ -4039,7 +4636,7 @@ class TestBuildKiroHistory:
         messages = [UnifiedMessage(role="user", content="Hello")]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         assert len(result) == 1
@@ -4047,7 +4644,7 @@ class TestBuildKiroHistory:
         assert result[0]["userInputMessage"]["content"] == "Hello"
         assert result[0]["userInputMessage"]["modelId"] == "claude-sonnet-4"
     
-    def test_builds_assistant_message(self):
+    async def test_builds_assistant_message(self):
         """
         What it does: Verifies building of assistant message.
         Purpose: Ensure assistant message is converted to assistantResponseMessage.
@@ -4056,14 +4653,14 @@ class TestBuildKiroHistory:
         messages = [UnifiedMessage(role="assistant", content="Hi there")]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         assert len(result) == 1
         assert "assistantResponseMessage" in result[0]
         assert result[0]["assistantResponseMessage"]["content"] == "Hi there"
     
-    def test_expects_normalized_roles_only(self):
+    async def test_expects_normalized_roles_only(self):
         """
         What it does: Verifies build_kiro_history only handles user/assistant roles.
         Purpose: After normalize_message_roles(), build_kiro_history should never
@@ -4076,7 +4673,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Comparing length: Expected 2, Got {len(result)}")
         assert len(result) == 2
@@ -4087,7 +4684,7 @@ class TestBuildKiroHistory:
         assert "assistantResponseMessage" in result[1]
         assert result[1]["assistantResponseMessage"]["content"] == "Assistant"
     
-    def test_builds_conversation_history(self):
+    async def test_builds_conversation_history(self):
         """
         What it does: Verifies building of full conversation history.
         Purpose: Ensure user/assistant alternation is preserved.
@@ -4100,7 +4697,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         assert len(result) == 3
@@ -4108,7 +4705,7 @@ class TestBuildKiroHistory:
         assert "assistantResponseMessage" in result[1]
         assert "userInputMessage" in result[2]
     
-    def test_handles_empty_list(self):
+    async def test_handles_empty_list(self):
         """
         What it does: Verifies empty list handling.
         Purpose: Ensure empty list returns empty history.
@@ -4116,12 +4713,12 @@ class TestBuildKiroHistory:
         print("Setup: Empty list...")
         
         print("Action: Building history...")
-        result = build_kiro_history([], "claude-sonnet-4")
+        result = await build_kiro_history([], "claude-sonnet-4")
         
         print(f"Comparing result: Expected [], Got {result}")
         assert result == []
     
-    def test_builds_user_message_with_tool_results(self):
+    async def test_builds_user_message_with_tool_results(self):
         """
         What it does: Verifies building of user message with tool_results.
         Purpose: Ensure tool_results are included in userInputMessageContext.
@@ -4138,7 +4735,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         assert len(result) == 1
@@ -4147,7 +4744,7 @@ class TestBuildKiroHistory:
         assert "userInputMessageContext" in user_msg
         assert "toolResults" in user_msg["userInputMessageContext"]
     
-    def test_builds_assistant_message_with_tool_calls(self):
+    async def test_builds_assistant_message_with_tool_calls(self):
         """
         What it does: Verifies building of assistant message with tool_calls.
         Purpose: Ensure tool_calls are converted to toolUses.
@@ -4168,7 +4765,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         assert len(result) == 1
@@ -4176,7 +4773,7 @@ class TestBuildKiroHistory:
         assistant_msg = result[0]["assistantResponseMessage"]
         assert "toolUses" in assistant_msg
     
-    def test_adds_empty_placeholder_for_empty_user_content(self):
+    async def test_adds_empty_placeholder_for_empty_user_content(self):
         """
         What it does: Verifies that "(empty placeholder)" placeholder is added for user messages with empty content.
         Purpose: Ensure Kiro API receives non-empty content in history.
@@ -4188,14 +4785,14 @@ class TestBuildKiroHistory:
         messages = [UnifiedMessage(role="user", content="")]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         print(f"Content: '{result[0]['userInputMessage']['content']}'")
         print("Checking that '(empty placeholder)' placeholder is added...")
         assert result[0]["userInputMessage"]["content"] == "(empty placeholder)"
     
-    def test_adds_empty_placeholder_for_empty_assistant_content(self):
+    async def test_adds_empty_placeholder_for_empty_assistant_content(self):
         """
         What it does: Verifies that "(empty placeholder)" placeholder is added for assistant messages with empty content.
         Purpose: Ensure Kiro API receives non-empty content in history.
@@ -4207,14 +4804,14 @@ class TestBuildKiroHistory:
         messages = [UnifiedMessage(role="assistant", content="")]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         print(f"Content: '{result[0]['assistantResponseMessage']['content']}'")
         print("Checking that '(empty placeholder)' placeholder is added...")
         assert result[0]["assistantResponseMessage"]["content"] == "(empty placeholder)"
     
-    def test_adds_empty_placeholder_for_none_user_content(self):
+    async def test_adds_empty_placeholder_for_none_user_content(self):
         """
         What it does: Verifies that "(empty placeholder)" placeholder is added for user messages with None content.
         Purpose: Ensure Kiro API receives non-empty content when content is None.
@@ -4223,14 +4820,14 @@ class TestBuildKiroHistory:
         messages = [UnifiedMessage(role="user", content=None)]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         print(f"Content: '{result[0]['userInputMessage']['content']}'")
         print("Checking that '(empty placeholder)' placeholder is added...")
         assert result[0]["userInputMessage"]["content"] == "(empty placeholder)"
     
-    def test_adds_empty_placeholder_for_none_assistant_content(self):
+    async def test_adds_empty_placeholder_for_none_assistant_content(self):
         """
         What it does: Verifies that "(empty placeholder)" placeholder is added for assistant messages with None content.
         Purpose: Ensure Kiro API receives non-empty content when content is None.
@@ -4239,14 +4836,14 @@ class TestBuildKiroHistory:
         messages = [UnifiedMessage(role="assistant", content=None)]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         print(f"Content: '{result[0]['assistantResponseMessage']['content']}'")
         print("Checking that '(empty placeholder)' placeholder is added...")
         assert result[0]["assistantResponseMessage"]["content"] == "(empty placeholder)"
     
-    def test_preserves_non_empty_content_in_history(self):
+    async def test_preserves_non_empty_content_in_history(self):
         """
         What it does: Verifies that non-empty content is preserved (not replaced with placeholder).
         Purpose: Ensure placeholder is only added when content is actually empty.
@@ -4258,14 +4855,14 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         print("Checking that original content is preserved...")
         assert result[0]["userInputMessage"]["content"] == "Hello"
         assert result[1]["assistantResponseMessage"]["content"] == "Hi there"
     
-    def test_mixed_empty_and_non_empty_content_in_history(self):
+    async def test_mixed_empty_and_non_empty_content_in_history(self):
         """
         What it does: Verifies correct handling of mixed empty and non-empty content.
         Purpose: Ensure only empty messages get placeholders.
@@ -4281,7 +4878,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         print("Checking each message...")
@@ -4298,7 +4895,7 @@ class TestBuildKiroHistory:
         print(f"Message 3 content: '{result[3]['assistantResponseMessage']['content']}'")
         assert result[3]["assistantResponseMessage"]["content"] == "Response"
     
-    def test_builds_user_message_with_images(self):
+    async def test_builds_user_message_with_images(self):
         """
         What it does: Verifies building of user message with images.
         Purpose: Ensure images are included directly in userInputMessage.images (Issue #32 fix).
@@ -4316,7 +4913,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         assert len(result) == 1
@@ -4334,7 +4931,7 @@ class TestBuildKiroHistory:
         assert images[0]["format"] == "jpeg"
         assert images[0]["source"]["bytes"] == TEST_IMAGE_BASE64
     
-    def test_builds_user_message_with_multiple_images(self):
+    async def test_builds_user_message_with_multiple_images(self):
         """
         What it does: Verifies building of user message with multiple images.
         Purpose: Ensure all images are included directly in userInputMessage (Issue #32 fix).
@@ -4352,7 +4949,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         user_msg = result[0]["userInputMessage"]
@@ -4369,7 +4966,7 @@ class TestBuildKiroHistory:
         assert images[1]["format"] == "png"
         assert images[1]["source"]["bytes"] == "image2_data"
     
-    def test_builds_user_message_with_images_and_tool_results(self):
+    async def test_builds_user_message_with_images_and_tool_results(self):
         """
         What it does: Verifies building of user message with both images and tool_results.
         Purpose: Ensure images are in userInputMessage and toolResults are in userInputMessageContext (Issue #32 fix).
@@ -4389,7 +4986,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         user_msg = result[0]["userInputMessage"]
@@ -4409,7 +5006,7 @@ class TestBuildKiroHistory:
         assert len(context["toolResults"]) == 1
         assert context["toolResults"][0]["toolUseId"] == "call_123"
     
-    def test_no_images_context_when_no_images(self):
+    async def test_no_images_context_when_no_images(self):
         """
         What it does: Verifies that images key is not added when there are no images.
         Purpose: Ensure clean payload without empty images array.
@@ -4420,7 +5017,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         user_msg = result[0]["userInputMessage"]
@@ -4433,7 +5030,7 @@ class TestBuildKiroHistory:
         else:
             print("No userInputMessageContext - OK")
     
-    def test_builds_user_message_with_webp_image(self):
+    async def test_builds_user_message_with_webp_image(self):
         """
         What it does: Verifies building of user message with WebP image.
         Purpose: Ensure WebP format is correctly converted to Kiro format in userInputMessage (Issue #32 fix).
@@ -4448,7 +5045,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         user_msg = result[0]["userInputMessage"]
@@ -4459,7 +5056,7 @@ class TestBuildKiroHistory:
         assert images[0]["format"] == "webp"
         assert images[0]["source"]["bytes"] == "webp_image_data"
     
-    def test_builds_user_message_with_gif_image(self):
+    async def test_builds_user_message_with_gif_image(self):
         """
         What it does: Verifies building of user message with GIF image.
         Purpose: Ensure GIF format is correctly converted to Kiro format in userInputMessage (Issue #32 fix).
@@ -4474,7 +5071,7 @@ class TestBuildKiroHistory:
         ]
         
         print("Action: Building history...")
-        result = build_kiro_history(messages, "claude-sonnet-4")
+        result = await build_kiro_history(messages, "claude-sonnet-4")
         
         print(f"Result: {result}")
         user_msg = result[0]["userInputMessage"]
@@ -5624,7 +6221,7 @@ class TestBuildKiroPayloadIssue20:
     The fix converts tool content to text representation when no tools are defined.
     """
     
-    def test_compaction_without_tools_converts_tool_content_to_text(self):
+    async def test_compaction_without_tools_converts_tool_content_to_text(self):
         """
         What it does: Simulates OpenCode compaction scenario - messages with tool content but no tools.
         Purpose: Ensure build_kiro_payload doesn't crash and converts tool content to text.
@@ -5658,7 +6255,7 @@ class TestBuildKiroPayloadIssue20:
         ]
         
         print("Action: Building Kiro payload WITHOUT tools (compaction scenario)...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="You are a helpful assistant.",
             model_id="claude-sonnet-4",
@@ -5705,7 +6302,7 @@ class TestBuildKiroPayloadIssue20:
                     break
         assert found_tool_text, "Tool calls should be converted to text representation"
     
-    def test_compaction_preserves_tool_result_content_as_text(self):
+    async def test_compaction_preserves_tool_result_content_as_text(self):
         """
         What it does: Verifies that tool result content is preserved as text.
         Purpose: Ensure the actual tool output is not lost during compaction.
@@ -5725,7 +6322,7 @@ class TestBuildKiroPayloadIssue20:
         ]
         
         print("Action: Building Kiro payload without tools...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4",
@@ -5760,7 +6357,7 @@ class TestBuildKiroPayloadIssue20:
         
         assert found_data, "Tool result content should be preserved as text"
     
-    def test_with_tools_defined_keeps_tool_structure(self):
+    async def test_with_tools_defined_keeps_tool_structure(self):
         """
         What it does: Verifies that when tools ARE defined, tool structure is preserved.
         Purpose: Ensure the fix doesn't break normal tool usage.
@@ -5796,7 +6393,7 @@ class TestBuildKiroPayloadIssue20:
         )]
         
         print("Action: Building Kiro payload WITH tools...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4",
@@ -5821,7 +6418,7 @@ class TestBuildKiroPayloadIssue20:
                     break
         assert found_tool_uses, "toolUses should be preserved when tools are defined"
     
-    def test_empty_tools_list_triggers_stripping(self):
+    async def test_empty_tools_list_triggers_stripping(self):
         """
         What it does: Verifies that empty tools list (tools=[]) triggers tool content stripping.
         Purpose: Ensure edge case of empty tools list is handled correctly.
@@ -5841,7 +6438,7 @@ class TestBuildKiroPayloadIssue20:
         ]
         
         print("Action: Building Kiro payload with empty tools list...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4",
@@ -5877,7 +6474,7 @@ class TestBuildKiroPayloadImages:
     These tests verify that images are correctly included in the Kiro payload.
     """
     
-    def test_includes_images_in_current_message(self):
+    async def test_includes_images_in_current_message(self):
         """
         What it does: Verifies that images are included in the current message.
         Purpose: Ensure images from the last user message are directly in userInputMessage (Issue #32 fix).
@@ -5894,7 +6491,7 @@ class TestBuildKiroPayloadImages:
         ]
         
         print("Action: Building Kiro payload...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="You are a helpful assistant.",
             model_id="claude-sonnet-4",
@@ -5922,7 +6519,7 @@ class TestBuildKiroPayloadImages:
         assert images[0]["format"] == "jpeg"
         assert images[0]["source"]["bytes"] == TEST_IMAGE_BASE64
     
-    def test_includes_multiple_images_in_current_message(self):
+    async def test_includes_multiple_images_in_current_message(self):
         """
         What it does: Verifies that multiple images are included in the current message.
         Purpose: Ensure all images from the last user message are directly in userInputMessage (Issue #32 fix).
@@ -5941,7 +6538,7 @@ class TestBuildKiroPayloadImages:
         ]
         
         print("Action: Building Kiro payload...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4",
@@ -5962,7 +6559,7 @@ class TestBuildKiroPayloadImages:
         assert images[1]["format"] == "png"
         assert images[2]["format"] == "gif"
     
-    def test_includes_images_in_history(self):
+    async def test_includes_images_in_history(self):
         """
         What it does: Verifies that images are included in history messages.
         Purpose: Ensure images from previous user messages are directly in userInputMessage (Issue #32 fix).
@@ -5979,7 +6576,7 @@ class TestBuildKiroPayloadImages:
         ]
         
         print("Action: Building Kiro payload...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4",
@@ -6004,7 +6601,7 @@ class TestBuildKiroPayloadImages:
         assert images[0]["format"] == "jpeg"
         assert images[0]["source"]["bytes"] == "history_image_data"
     
-    def test_images_with_tools(self):
+    async def test_images_with_tools(self):
         """
         What it does: Verifies that images work correctly with tools.
         Purpose: Ensure images are in userInputMessage and tools are in userInputMessageContext (Issue #32 fix).
@@ -6025,7 +6622,7 @@ class TestBuildKiroPayloadImages:
         )]
         
         print("Action: Building Kiro payload with tools...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4",
@@ -6052,7 +6649,7 @@ class TestBuildKiroPayloadImages:
         assert len(context["tools"]) == 1
         assert context["tools"][0]["toolSpecification"]["name"] == "analyze_image"
     
-    def test_images_with_tool_results(self):
+    async def test_images_with_tool_results(self):
         """
         What it does: Verifies that images work correctly with tool results.
         Purpose: Ensure images are in userInputMessage and tool_results are in userInputMessageContext (Issue #32 fix).
@@ -6088,7 +6685,7 @@ class TestBuildKiroPayloadImages:
         )]
         
         print("Action: Building Kiro payload...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4",
@@ -6115,7 +6712,7 @@ class TestBuildKiroPayloadImages:
         print("Checking toolResults...")
         assert len(context["toolResults"]) == 1
     
-    def test_no_images_when_none_provided(self):
+    async def test_no_images_when_none_provided(self):
         """
         What it does: Verifies that images key is not added when no images are provided.
         Purpose: Ensure clean payload without unnecessary empty arrays.
@@ -6126,7 +6723,7 @@ class TestBuildKiroPayloadImages:
         ]
         
         print("Action: Building Kiro payload...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4",
@@ -6145,7 +6742,7 @@ class TestBuildKiroPayloadImages:
         else:
             print("No images key - OK")
     
-    def test_large_image_data_preserved(self):
+    async def test_large_image_data_preserved(self):
         """
         What it does: Verifies that large image data is preserved without truncation.
         Purpose: Ensure large images are not corrupted during conversion (Issue #32 fix).
@@ -6161,7 +6758,7 @@ class TestBuildKiroPayloadImages:
         ]
         
         print("Action: Building Kiro payload...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4",
@@ -6178,7 +6775,7 @@ class TestBuildKiroPayloadImages:
         assert len(images[0]["source"]["bytes"]) == 500000
         assert images[0]["source"]["bytes"] == large_image_data
     
-    def test_images_with_thinking_injection(self):
+    async def test_images_with_thinking_injection(self):
         """
         What it does: Verifies that images work correctly with thinking injection.
         Purpose: Ensure images are preserved in userInputMessage when fake reasoning is enabled (Issue #32 fix).
@@ -6195,7 +6792,7 @@ class TestBuildKiroPayloadImages:
         print("Action: Building Kiro payload with thinking injection...")
         with patch('kiro.converters_core.FAKE_REASONING_ENABLED', True):
             with patch('kiro.converters_core.FAKE_REASONING_MAX_TOKENS', 4000):
-                result = build_kiro_payload(
+                result = await build_kiro_payload(
                     messages=messages,
                     system_prompt="",
                     model_id="claude-sonnet-4",
@@ -6758,7 +7355,7 @@ class TestInjectThinkingTagsWithConfig:
 class TestBuildKiroPayloadWithThinkingConfig:
     """Tests for build_kiro_payload with thinking_config parameter."""
     
-    def test_passes_thinking_config_to_inject(self, monkeypatch):
+    async def test_passes_thinking_config_to_inject(self, monkeypatch):
         """
         What it does: Verifies that build_kiro_payload passes thinking_config to inject_thinking_tags
         Purpose: Ensure thinking configuration flows through the pipeline
@@ -6771,7 +7368,7 @@ class TestBuildKiroPayloadWithThinkingConfig:
         thinking_config = ThinkingConfig(enabled=True, budget_tokens=7000)
         
         print(f"Calling build_kiro_payload with thinking_config={thinking_config}...")
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="claude-sonnet-4.5",
@@ -6904,7 +7501,7 @@ class TestToolChoicePolicy:
         )
         assert [tool.name for tool in policy.filter_tools(tools)] == ["Read"]
 
-    def test_named_policy_text_converts_undeclared_history_tools(self):
+    async def test_named_policy_text_converts_undeclared_history_tools(self):
         messages = [
             UnifiedMessage(role="user", content="Run Bash"),
             UnifiedMessage(
@@ -6928,7 +7525,7 @@ class TestToolChoicePolicy:
             UnifiedMessage(role="assistant", content="Finished"),
             UnifiedMessage(role="user", content="Now read"),
         ]
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="test-model",
@@ -6950,7 +7547,7 @@ class TestToolChoicePolicy:
             tool["toolSpecification"]["name"] for tool in current_context["tools"]
         ] == ["Read"]
 
-    def test_none_preserves_tool_history_as_text(self):
+    async def test_none_preserves_tool_history_as_text(self):
         messages = [
             UnifiedMessage(role="user", content="Run it"),
             UnifiedMessage(
@@ -6974,7 +7571,7 @@ class TestToolChoicePolicy:
             UnifiedMessage(role="assistant", content="Finished"),
             UnifiedMessage(role="user", content="Continue without tools"),
         ]
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=messages,
             system_prompt="",
             model_id="test-model",

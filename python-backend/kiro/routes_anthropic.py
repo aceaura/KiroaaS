@@ -405,7 +405,7 @@ async def messages(
             profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
 
             try:
-                kiro_payload = anthropic_to_kiro(
+                kiro_payload = await anthropic_to_kiro(
                     request_data,
                     conversation_id,
                     profile_arn_for_payload,
@@ -810,7 +810,7 @@ async def messages(
     profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
 
     try:
-        kiro_payload = anthropic_to_kiro(
+        kiro_payload = await anthropic_to_kiro(
             request_data,
             conversation_id,
             profile_arn_for_payload,

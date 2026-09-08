@@ -36,7 +36,7 @@ def test_alias_is_short_stable_and_reversible():
     assert original_for_tool_name(first) == LONG_TOOL_NAME
 
 
-def test_build_payload_sends_alias_to_kiro():
+async def test_build_payload_sends_alias_to_kiro():
     install_tool_name_aliasing()
 
     from kiro.converters_core import (
@@ -46,7 +46,7 @@ def test_build_payload_sends_alias_to_kiro():
         build_kiro_payload,
     )
 
-    result = build_kiro_payload(
+    result = await build_kiro_payload(
         messages=[UnifiedMessage(role="user", content="Call the tool")],
         system_prompt="",
         model_id="test-model",
@@ -72,7 +72,7 @@ def test_build_payload_sends_alias_to_kiro():
     assert original_for_tool_name(spec_name) == LONG_TOOL_NAME
 
 
-def test_alias_avoids_existing_short_tool_name():
+async def test_alias_avoids_existing_short_tool_name():
     predicted_alias = alias_for_tool_name(LONG_TOOL_NAME)
     uninstall_tool_name_aliasing()
     install_tool_name_aliasing()
@@ -84,7 +84,7 @@ def test_alias_avoids_existing_short_tool_name():
         build_kiro_payload,
     )
 
-    result = build_kiro_payload(
+    result = await build_kiro_payload(
         messages=[UnifiedMessage(role="user", content="Call the tool")],
         system_prompt="",
         model_id="test-model",
@@ -118,7 +118,7 @@ def test_alias_avoids_existing_short_tool_name():
     assert original_for_tool_name(spec_names[1]) == LONG_TOOL_NAME
 
 
-def test_history_tool_uses_are_aliased_for_kiro():
+async def test_history_tool_uses_are_aliased_for_kiro():
     install_tool_name_aliasing()
 
     from kiro.converters_core import (
@@ -128,7 +128,7 @@ def test_history_tool_uses_are_aliased_for_kiro():
         build_kiro_payload,
     )
 
-    result = build_kiro_payload(
+    result = await build_kiro_payload(
         messages=[
             UnifiedMessage(role="user", content="Use it"),
             UnifiedMessage(

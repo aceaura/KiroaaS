@@ -354,7 +354,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
 
             try:
-                kiro_payload = build_kiro_payload(
+                kiro_payload = await build_kiro_payload(
                     request_data,
                     conversation_id,
                     profile_arn_for_payload,
@@ -694,7 +694,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
 
     try:
-        kiro_payload = build_kiro_payload(
+        kiro_payload = await build_kiro_payload(
             request_data,
             conversation_id,
             profile_arn_for_payload,

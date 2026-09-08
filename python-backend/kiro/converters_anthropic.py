@@ -47,6 +47,7 @@ from kiro.converters_core import (
     UnifiedTool,
     ThinkingConfig,
     ToolChoicePolicy,
+    ImageFetchBudget,
     build_kiro_payload,
     parse_tool_choice_policy,
     coerce_tool_input_to_dict,
@@ -299,7 +300,10 @@ def extract_tool_results_from_anthropic_content(content: Any) -> List[Dict[str, 
     return tool_results
 
 
-def extract_images_from_tool_results(content: Any) -> List[Dict[str, Any]]:
+async def extract_images_from_tool_results(
+    content: Any,
+    budget: Optional[ImageFetchBudget] = None,
+) -> List[Dict[str, Any]]:
     """
     Extracts images from tool_result content blocks.
 
@@ -308,6 +312,8 @@ def extract_images_from_tool_results(content: Any) -> List[Dict[str, Any]]:
 
     Args:
         content: Anthropic message content (list of content blocks)
+        budget: Shared ImageFetchBudget, so URL images inside tool results count
+            against the same request-wide fetch cap as everything else
 
     Returns:
         List of images in unified format: [{"media_type": "image/jpeg", "data": "base64..."}]
@@ -330,7 +336,7 @@ def extract_images_from_tool_results(content: Any) -> List[Dict[str, Any]]:
 
         if block_type == "tool_result" and isinstance(result_content, list):
             # Extract images from the tool_result's content
-            tool_result_images = extract_images_from_content(result_content)
+            tool_result_images = await extract_images_from_content(result_content, budget)
             images.extend(tool_result_images)
 
     if images:
@@ -392,8 +398,9 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
     return tool_calls
 
 
-def convert_anthropic_messages(
+async def convert_anthropic_messages(
     messages: List[AnthropicMessage],
+    budget: Optional[ImageFetchBudget] = None,
 ) -> List[UnifiedMessage]:
     """
     Converts Anthropic messages to unified format.
@@ -405,6 +412,8 @@ def convert_anthropic_messages(
 
     Args:
         messages: List of Anthropic messages
+        budget: Shared ImageFetchBudget, so URL images across all messages count
+            against one request-wide fetch cap and repeats are fetched once
 
     Returns:
         List of messages in unified format
@@ -440,11 +449,11 @@ def convert_anthropic_messages(
                 total_tool_results += len(tool_results)
 
             # Extract images from user messages (both top-level and inside tool_results)
-            images = extract_images_from_content(content)
+            images = await extract_images_from_content(content, budget)
 
             # Also extract images from inside tool_result content blocks
             # (e.g., screenshots returned by browser MCP tools)
-            tool_result_images = extract_images_from_tool_results(content)
+            tool_result_images = await extract_images_from_tool_results(content, budget)
             if tool_result_images:
                 if images:
                     images.extend(tool_result_images)
@@ -604,7 +613,7 @@ def resolve_anthropic_first_token_timeout(request: AnthropicMessagesRequest) -> 
     return resolve_first_token_timeout(model_id, thinking_config.effort)
 
 
-def anthropic_to_kiro(
+async def anthropic_to_kiro(
     request: AnthropicMessagesRequest,
     conversation_id: str,
     profile_arn: str,
@@ -632,8 +641,12 @@ def anthropic_to_kiro(
     Raises:
         ValueError: If there are no messages to send
     """
+    # One budget for the request: message conversion and payload building both
+    # extract images, so they must share the cap and the dedup cache.
+    image_budget = ImageFetchBudget()
+
     # Convert messages to unified format
-    unified_messages = convert_anthropic_messages(request.messages)
+    unified_messages = await convert_anthropic_messages(request.messages, image_budget)
 
     # Resolve against original client-visible names before extension aliasing.
     tool_choice_policy, unified_tools, _ = resolve_anthropic_tool_choice(request)
@@ -676,7 +689,7 @@ def anthropic_to_kiro(
     )
 
     # Use core function to build payload
-    result = build_kiro_payload(
+    result = await build_kiro_payload(
         messages=unified_messages,
         system_prompt=system_prompt,
         model_id=model_id,
@@ -686,6 +699,7 @@ def anthropic_to_kiro(
         thinking_config=thinking_config,
         native_thinking=native_thinking,
         request_audit=request_audit,
+        budget=image_budget,
     )
 
     return result.payload

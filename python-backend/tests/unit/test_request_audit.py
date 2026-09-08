@@ -90,7 +90,7 @@ def test_audit_logs_linked_effort_and_accumulated_credit_once():
     assert "INVALID_SECRET" not in "\n".join(logs)
 
 
-def test_converter_links_effort_to_audit_without_sensitive_payload_data():
+async def test_converter_links_effort_to_audit_without_sensitive_payload_data():
     audit = RequestAudit(
         protocol="openai",
         client_model="gpt-5.6-sol",
@@ -98,7 +98,7 @@ def test_converter_links_effort_to_audit_without_sensitive_payload_data():
     )
 
     with patch("kiro.request_audit.logger.info") as mock_info:
-        result = build_kiro_payload(
+        result = await build_kiro_payload(
             messages=[UnifiedMessage(role="user", content="MESSAGE_SECRET")],
             system_prompt="SYSTEM_SECRET",
             model_id="gpt-5.6-sol",

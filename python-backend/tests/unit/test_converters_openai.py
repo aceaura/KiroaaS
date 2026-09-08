@@ -31,7 +31,7 @@ from kiro.models_openai import ChatMessage, ChatCompletionRequest, Tool, ToolFun
 class TestConvertOpenAIMessagesToUnified:
     """Tests for convert_openai_messages_to_unified function."""
 
-    def test_extracts_system_prompt(self):
+    async def test_extracts_system_prompt(self):
         """
         What it does: Verifies extraction of system prompt from messages.
         Purpose: Ensure system messages are extracted separately.
@@ -43,7 +43,7 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"System prompt: '{system_prompt}'")
         print(f"Unified messages: {len(unified)}")
@@ -51,7 +51,7 @@ class TestConvertOpenAIMessagesToUnified:
         assert len(unified) == 1
         assert unified[0].role == "user"
 
-    def test_combines_multiple_system_messages(self):
+    async def test_combines_multiple_system_messages(self):
         """
         What it does: Verifies combining of multiple system messages.
         Purpose: Ensure all system messages are concatenated.
@@ -64,14 +64,14 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"System prompt: '{system_prompt}'")
         assert "You are helpful." in system_prompt
         assert "Be concise." in system_prompt
         assert len(unified) == 1
 
-    def test_converts_tool_message_to_user_with_tool_results(self):
+    async def test_converts_tool_message_to_user_with_tool_results(self):
         """
         What it does: Verifies conversion of tool message to user message with tool_results.
         Purpose: Ensure role="tool" is converted correctly.
@@ -82,7 +82,7 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Unified messages: {unified}")
         assert len(unified) == 1
@@ -91,7 +91,7 @@ class TestConvertOpenAIMessagesToUnified:
         assert len(unified[0].tool_results) == 1
         assert unified[0].tool_results[0]["tool_use_id"] == "call_123"
 
-    def test_converts_multiple_tool_messages(self):
+    async def test_converts_multiple_tool_messages(self):
         """
         What it does: Verifies conversion of multiple consecutive tool messages.
         Purpose: Ensure all tool results are collected into one user message.
@@ -104,14 +104,14 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Unified messages: {unified}")
         assert len(unified) == 1
         assert unified[0].role == "user"
         assert len(unified[0].tool_results) == 3
 
-    def test_extracts_tool_calls_from_assistant(self):
+    async def test_extracts_tool_calls_from_assistant(self):
         """
         What it does: Verifies extraction of tool_calls from assistant message.
         Purpose: Ensure tool_calls are preserved in unified format.
@@ -130,7 +130,7 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Unified messages: {unified}")
         assert len(unified) == 1
@@ -139,7 +139,7 @@ class TestConvertOpenAIMessagesToUnified:
         assert len(unified[0].tool_calls) == 1
         assert unified[0].tool_calls[0]["id"] == "call_123"
 
-    def test_handles_empty_tool_call_id(self):
+    async def test_handles_empty_tool_call_id(self):
         """
         What it does: Verifies handling of None tool_call_id.
         Purpose: Ensure None is replaced with empty string.
@@ -150,12 +150,12 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Unified messages: {unified}")
         assert unified[0].tool_results[0]["tool_use_id"] == ""
 
-    def test_handles_empty_tool_content(self):
+    async def test_handles_empty_tool_content(self):
         """
         What it does: Verifies handling of empty tool content.
         Purpose: Ensure empty content is replaced with "(empty result)".
@@ -166,12 +166,12 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Unified messages: {unified}")
         assert unified[0].tool_results[0]["content"] == "(empty result)"
 
-    def test_tool_messages_followed_by_user_message(self):
+    async def test_tool_messages_followed_by_user_message(self):
         """
         What it does: Verifies tool messages followed by user message.
         Purpose: Ensure tool results are in separate message from user content.
@@ -183,7 +183,7 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Unified messages: {unified}")
         # Tool results should be in first message, user content in second
@@ -197,7 +197,7 @@ class TestConvertOpenAIMessagesToUnified:
     # Image extraction tests (Issue #30 fix)
     # ==================================================================================
 
-    def test_extracts_images_from_user_message(self):
+    async def test_extracts_images_from_user_message(self):
         """
         What it does: Verifies that images are extracted from user messages.
         Purpose: Ensure OpenAI image_url content blocks are converted to unified format.
@@ -224,7 +224,7 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Result: {unified}")
         print(f"Images: {unified[0].images}")
@@ -244,7 +244,7 @@ class TestConvertOpenAIMessagesToUnified:
         print(f"Comparing image data: Expected {test_image_base64[:20]}..., Got {image.get('data', '')[:20]}...")
         assert image["data"] == test_image_base64
 
-    def test_images_only_extracted_from_user_role(self):
+    async def test_images_only_extracted_from_user_role(self):
         """
         What it does: Verifies that images are only extracted from user messages.
         Purpose: Ensure assistant messages don't have images extracted.
@@ -270,7 +270,7 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Result: {unified}")
 
@@ -281,7 +281,7 @@ class TestConvertOpenAIMessagesToUnified:
         print("Checking assistant message has no images...")
         assert unified[1].images is None, "Assistant messages should not have images extracted"
 
-    def test_extracts_multiple_images_from_user_message(self):
+    async def test_extracts_multiple_images_from_user_message(self):
         """
         What it does: Verifies extraction of multiple images from a single user message.
         Purpose: Ensure all images in a message are extracted.
@@ -311,7 +311,7 @@ class TestConvertOpenAIMessagesToUnified:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Result images count: {len(unified[0].images) if unified[0].images else 0}")
 
@@ -325,7 +325,7 @@ class TestConvertOpenAIMessagesToUnified:
         assert "image/png" in media_types
         assert "image/webp" in media_types
 
-    def test_counts_images_in_debug_log(self, caplog):
+    async def test_counts_images_in_debug_log(self, caplog):
         """
         What it does: Verifies that image count is logged in debug message.
         Purpose: Ensure logging includes image statistics for debugging.
@@ -354,7 +354,7 @@ class TestConvertOpenAIMessagesToUnified:
 
         print("Action: Converting messages with logging enabled...")
         with caplog.at_level(logging.DEBUG):
-            system_prompt, unified = convert_openai_messages_to_unified(messages)
+            system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Log records: {[r.message for r in caplog.records]}")
 
@@ -671,7 +671,7 @@ class TestConvertOpenAIToolsToUnified:
 class TestBuildKiroPayload:
     """Tests for build_kiro_payload function."""
 
-    def test_builds_simple_payload(self):
+    async def test_builds_simple_payload(self):
         """
         What it does: Verifies building of simple payload.
         Purpose: Ensure basic request is converted correctly.
@@ -683,7 +683,7 @@ class TestBuildKiroPayload:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "arn:aws:test")
+        result = await build_kiro_payload(request, "conv-123", "arn:aws:test")
 
         print(f"Result: {result}")
         assert "conversationState" in result
@@ -691,7 +691,7 @@ class TestBuildKiroPayload:
         assert "currentMessage" in result["conversationState"]
         assert result["profileArn"] == "arn:aws:test"
 
-    def test_includes_system_prompt_in_first_message(self):
+    async def test_includes_system_prompt_in_first_message(self):
         """
         What it does: Verifies adding system prompt to first message.
         Purpose: Ensure system prompt is merged with user message.
@@ -706,14 +706,14 @@ class TestBuildKiroPayload:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "You are helpful" in current_content
         assert "Hello" in current_content
 
-    def test_builds_history_for_multi_turn(self):
+    async def test_builds_history_for_multi_turn(self):
         """
         What it does: Verifies building history for multi-turn.
         Purpose: Ensure previous messages go into history.
@@ -729,13 +729,13 @@ class TestBuildKiroPayload:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         assert "history" in result["conversationState"]
         assert len(result["conversationState"]["history"]) == 2
 
-    def test_handles_assistant_as_last_message(self):
+    async def test_handles_assistant_as_last_message(self):
         """
         What it does: Verifies handling of assistant as last message.
         Purpose: Ensure "(empty placeholder)" message is created.
@@ -750,13 +750,13 @@ class TestBuildKiroPayload:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert current_content == "(empty placeholder)"
 
-    def test_raises_for_empty_messages(self):
+    async def test_raises_for_empty_messages(self):
         """
         What it does: Verifies exception raising for empty messages.
         Purpose: Ensure empty request raises ValueError.
@@ -769,12 +769,12 @@ class TestBuildKiroPayload:
 
         print("Action: Attempting to build payload...")
         with pytest.raises(ValueError) as exc_info:
-            build_kiro_payload(request, "conv-123", "")
+            await build_kiro_payload(request, "conv-123", "")
 
         print(f"Exception: {exc_info.value}")
         assert "No messages to send" in str(exc_info.value)
 
-    def test_uses_continue_for_empty_content(self):
+    async def test_uses_continue_for_empty_content(self):
         """
         What it does: Verifies using "(empty placeholder)" for empty content.
         Purpose: Ensure empty message is replaced with "(empty placeholder)".
@@ -788,13 +788,13 @@ class TestBuildKiroPayload:
         print("Action: Building payload (with fake reasoning and truncation recovery disabled)...")
         with patch('kiro.converters_core.FAKE_REASONING_ENABLED', False):
             with patch('kiro.config.TRUNCATION_RECOVERY', False):
-                result = build_kiro_payload(request, "conv-123", "")
+                result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert current_content == "(empty placeholder)"
 
-    def test_normalizes_model_id_correctly(self):
+    async def test_normalizes_model_id_correctly(self):
         """
         What it does: Verifies normalization of external model ID to Kiro format.
         Purpose: Ensure model name normalization is applied (dashes→dots, strip dates).
@@ -810,7 +810,7 @@ class TestBuildKiroPayload:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         model_id = result["conversationState"]["currentMessage"]["userInputMessage"]["modelId"]
@@ -818,7 +818,7 @@ class TestBuildKiroPayload:
         print(f"Comparing model_id: Expected 'claude-sonnet-4.5', Got '{model_id}'")
         assert model_id == "claude-sonnet-4.5"
 
-    def test_includes_tools_in_context(self):
+    async def test_includes_tools_in_context(self):
         """
         What it does: Verifies including tools in userInputMessageContext.
         Purpose: Ensure tools are converted and included.
@@ -838,7 +838,7 @@ class TestBuildKiroPayload:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         context = result["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
@@ -846,7 +846,7 @@ class TestBuildKiroPayload:
         assert len(context["tools"]) == 1
         assert context["tools"][0]["toolSpecification"]["name"] == "get_weather"
 
-    def test_injects_thinking_tags_even_when_tool_results_present(self):
+    async def test_injects_thinking_tags_even_when_tool_results_present(self):
         """
         What it does: Verifies thinking tags ARE injected even when toolResults are present.
         Purpose: Extended thinking should work in all scenarios including tool use flows.
@@ -883,7 +883,7 @@ class TestBuildKiroPayload:
         print("Action: Building payload with FAKE_REASONING_ENABLED=True...")
         with patch('kiro.converters_core.FAKE_REASONING_ENABLED', True):
             with patch('kiro.converters_core.FAKE_REASONING_MAX_TOKENS', 4000):
-                result = build_kiro_payload(request, "conv-123", "")
+                result = await build_kiro_payload(request, "conv-123", "")
 
         current_msg = result["conversationState"]["currentMessage"]["userInputMessage"]
         content = current_msg["content"]
@@ -896,7 +896,7 @@ class TestBuildKiroPayload:
         assert "<thinking_mode>enabled</thinking_mode>" in content, "thinking tags SHOULD be injected even with toolResults"
         assert "<max_thinking_length>4000</max_thinking_length>" in content, "max_thinking_length should be present"
 
-    def test_injects_thinking_tags_when_no_tool_results(self):
+    async def test_injects_thinking_tags_when_no_tool_results(self):
         """
         What it does: Verifies thinking tags ARE injected for normal user messages.
         Purpose: Ensure fix for issue #20 doesn't break normal thinking tag injection.
@@ -910,7 +910,7 @@ class TestBuildKiroPayload:
         print("Action: Building payload with FAKE_REASONING_ENABLED=True...")
         with patch('kiro.converters_core.FAKE_REASONING_ENABLED', True):
             with patch('kiro.converters_core.FAKE_REASONING_MAX_TOKENS', 4000):
-                result = build_kiro_payload(request, "conv-123", "")
+                result = await build_kiro_payload(request, "conv-123", "")
 
         current_msg = result["conversationState"]["currentMessage"]["userInputMessage"]
         content = current_msg["content"]
@@ -931,7 +931,7 @@ class TestBuildKiroPayload:
 class TestToolMessageHandling:
     """Tests for OpenAI tool message (role="tool") handling."""
 
-    def test_converts_multiple_tool_messages_to_single_user_message(self):
+    async def test_converts_multiple_tool_messages_to_single_user_message(self):
         """
         What it does: Verifies merging of multiple tool messages into single user message.
         Purpose: Ensure multiple tool results are merged into one user message.
@@ -944,7 +944,7 @@ class TestToolMessageHandling:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Result: {unified}")
         print(f"Comparing length: Expected 1, Got {len(unified)}")
@@ -960,7 +960,7 @@ class TestToolMessageHandling:
         assert "call_2" in tool_use_ids
         assert "call_3" in tool_use_ids
 
-    def test_assistant_tool_user_sequence(self):
+    async def test_assistant_tool_user_sequence(self):
         """
         What it does: Verifies assistant -> tool -> user sequence.
         Purpose: Ensure tool message is correctly inserted between assistant and user.
@@ -973,7 +973,7 @@ class TestToolMessageHandling:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Result: {unified}")
         # assistant stays, tool becomes user with tool_results, then user
@@ -983,7 +983,7 @@ class TestToolMessageHandling:
         assert unified[1].tool_results is not None
         assert unified[2].role == "user"
 
-    def test_tool_message_with_empty_content(self):
+    async def test_tool_message_with_empty_content(self):
         """
         What it does: Verifies tool message with empty content.
         Purpose: Ensure empty result is replaced with "(empty result)".
@@ -994,13 +994,13 @@ class TestToolMessageHandling:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Result: {unified}")
         assert len(unified) == 1
         assert unified[0].tool_results[0]["content"] == "(empty result)"
 
-    def test_tool_message_with_none_tool_call_id(self):
+    async def test_tool_message_with_none_tool_call_id(self):
         """
         What it does: Verifies tool message without tool_call_id.
         Purpose: Ensure missing tool_call_id is replaced with empty string.
@@ -1011,7 +1011,7 @@ class TestToolMessageHandling:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Result: {unified}")
         assert len(unified) == 1
@@ -1025,7 +1025,7 @@ class TestToolMessageHandling:
 class TestToolDescriptionHandling:
     """Tests for handling empty/whitespace tool descriptions."""
 
-    def test_empty_description_replaced_with_placeholder(self):
+    async def test_empty_description_replaced_with_placeholder(self):
         """
         What it does: Verifies replacement of empty description with placeholder.
         Purpose: Ensure empty description is replaced with "Tool: {name}".
@@ -1048,7 +1048,7 @@ class TestToolDescriptionHandling:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         print("Checking that description is replaced with placeholder...")
@@ -1056,7 +1056,7 @@ class TestToolDescriptionHandling:
         tool_spec = context["tools"][0]["toolSpecification"]
         assert tool_spec["description"] == "Tool: focus_chain"
 
-    def test_whitespace_only_description_replaced_with_placeholder(self):
+    async def test_whitespace_only_description_replaced_with_placeholder(self):
         """
         What it does: Verifies replacement of whitespace-only description with placeholder.
         Purpose: Ensure description with only whitespace is replaced.
@@ -1076,7 +1076,7 @@ class TestToolDescriptionHandling:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         print("Checking that description is replaced with placeholder...")
@@ -1084,7 +1084,7 @@ class TestToolDescriptionHandling:
         tool_spec = context["tools"][0]["toolSpecification"]
         assert tool_spec["description"] == "Tool: whitespace_tool"
 
-    def test_none_description_replaced_with_placeholder(self):
+    async def test_none_description_replaced_with_placeholder(self):
         """
         What it does: Verifies replacement of None description with placeholder.
         Purpose: Ensure None description is replaced with "Tool: {name}".
@@ -1104,7 +1104,7 @@ class TestToolDescriptionHandling:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         print("Checking that description is replaced with placeholder...")
@@ -1112,7 +1112,7 @@ class TestToolDescriptionHandling:
         tool_spec = context["tools"][0]["toolSpecification"]
         assert tool_spec["description"] == "Tool: none_desc_tool"
 
-    def test_non_empty_description_preserved(self):
+    async def test_non_empty_description_preserved(self):
         """
         What it does: Verifies preservation of non-empty description.
         Purpose: Ensure normal description is not changed.
@@ -1132,7 +1132,7 @@ class TestToolDescriptionHandling:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         print("Checking that description is preserved...")
@@ -1140,7 +1140,7 @@ class TestToolDescriptionHandling:
         tool_spec = context["tools"][0]["toolSpecification"]
         assert tool_spec["description"] == "Get weather for a location"
 
-    def test_sanitizes_tool_parameters(self):
+    async def test_sanitizes_tool_parameters(self):
         """
         What it does: Verifies sanitization of parameters from problematic fields.
         Purpose: Ensure sanitize_json_schema is applied to parameters.
@@ -1165,7 +1165,7 @@ class TestToolDescriptionHandling:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         print("Checking that parameters are sanitized...")
@@ -1174,7 +1174,7 @@ class TestToolDescriptionHandling:
         assert "required" not in input_schema
         assert "additionalProperties" not in input_schema
 
-    def test_mixed_tools_with_empty_and_normal_descriptions(self):
+    async def test_mixed_tools_with_empty_and_normal_descriptions(self):
         """
         What it does: Verifies handling of mixed tools list.
         Purpose: Ensure empty descriptions are replaced while normal ones are preserved.
@@ -1215,7 +1215,7 @@ class TestToolDescriptionHandling:
         )
 
         print("Action: Building payload...")
-        result = build_kiro_payload(request, "conv-123", "")
+        result = await build_kiro_payload(request, "conv-123", "")
 
         print(f"Result: {result}")
         print("Checking descriptions...")
@@ -1236,7 +1236,7 @@ class TestBuildKiroPayloadToolCallsIntegration:
     Tests full flow from OpenAI format to Kiro format.
     """
 
-    def test_multiple_assistant_tool_calls_with_results(self):
+    async def test_multiple_assistant_tool_calls_with_results(self):
         """
         What it does: Verifies full scenario with multiple assistant tool_calls and their results.
         Purpose: Ensure all toolUses and toolResults are correctly linked in Kiro payload.
@@ -1287,7 +1287,7 @@ class TestBuildKiroPayloadToolCallsIntegration:
         )
 
         print("Action: Building Kiro payload...")
-        result = build_kiro_payload(request, "conv-123", "arn:aws:test")
+        result = await build_kiro_payload(request, "conv-123", "arn:aws:test")
 
         print(f"Result: {result}")
 
@@ -1329,7 +1329,7 @@ class TestBuildKiroPayloadToolCallsIntegration:
         assert "tooluse_first" in tool_result_ids
         assert "tooluse_second" in tool_result_ids
 
-    def test_long_tool_description_added_to_system_prompt(self):
+    async def test_long_tool_description_added_to_system_prompt(self):
         """
         What it does: Verifies integration of long tool descriptions into payload.
         Purpose: Ensure long descriptions are added to system prompt in payload.
@@ -1354,7 +1354,7 @@ class TestBuildKiroPayloadToolCallsIntegration:
 
         print("Action: Building payload...")
         with patch('kiro.converters_core.TOOL_DESCRIPTION_MAX_LENGTH', 10000):
-            result = build_kiro_payload(request, "conv-123", "")
+            result = await build_kiro_payload(request, "conv-123", "")
 
         print("Checking that system prompt contains tool documentation...")
         current_content = result["conversationState"]["currentMessage"]["userInputMessage"]["content"]
@@ -1374,7 +1374,7 @@ class TestBuildKiroPayloadToolCallsIntegration:
 class TestExtractImagesFromToolMessage:
     """Tests for _extract_images_from_tool_message function."""
 
-    def test_extracts_single_image_from_tool_message(self):
+    async def test_extracts_single_image_from_tool_message(self):
         """
         What it does: Verifies extraction of a single image from tool message content.
         Purpose: Ensure images in OpenAI tool messages are properly extracted (MCP support).
@@ -1389,14 +1389,14 @@ class TestExtractImagesFromToolMessage:
         ]
 
         print("Action: Extracting images from tool message...")
-        result = _extract_images_from_tool_message(content)
+        result = await _extract_images_from_tool_message(content)
 
         print(f"Result: {result}")
         assert len(result) == 1
         assert result[0]["media_type"] == "image/png"
         assert result[0]["data"] == "iVBORw0KGgoAAAANSUhEUg=="
 
-    def test_extracts_multiple_images_from_tool_message(self):
+    async def test_extracts_multiple_images_from_tool_message(self):
         """
         What it does: Verifies extraction of multiple images from tool message.
         Purpose: Ensure all images are extracted from a single tool message.
@@ -1414,7 +1414,7 @@ class TestExtractImagesFromToolMessage:
         ]
 
         print("Action: Extracting images from tool message...")
-        result = _extract_images_from_tool_message(content)
+        result = await _extract_images_from_tool_message(content)
 
         print(f"Result: {result}")
         assert len(result) == 2
@@ -1423,7 +1423,7 @@ class TestExtractImagesFromToolMessage:
         assert result[1]["media_type"] == "image/jpeg"
         assert result[1]["data"] == "jpeg_data"
 
-    def test_returns_empty_for_text_only_tool_message(self):
+    async def test_returns_empty_for_text_only_tool_message(self):
         """
         What it does: Verifies empty list returned when tool message has no images.
         Purpose: Ensure text-only tool messages don't produce spurious images.
@@ -1434,12 +1434,12 @@ class TestExtractImagesFromToolMessage:
         ]
 
         print("Action: Extracting images from tool message...")
-        result = _extract_images_from_tool_message(content)
+        result = await _extract_images_from_tool_message(content)
 
         print(f"Result: {result}")
         assert result == []
 
-    def test_returns_empty_for_string_content(self):
+    async def test_returns_empty_for_string_content(self):
         """
         What it does: Verifies empty list returned for string content.
         Purpose: Ensure string content doesn't cause errors.
@@ -1448,12 +1448,12 @@ class TestExtractImagesFromToolMessage:
         content = "Just a string result"
 
         print("Action: Extracting images from tool message...")
-        result = _extract_images_from_tool_message(content)
+        result = await _extract_images_from_tool_message(content)
 
         print(f"Result: {result}")
         assert result == []
 
-    def test_returns_empty_for_none_content(self):
+    async def test_returns_empty_for_none_content(self):
         """
         What it does: Verifies empty list returned for None content.
         Purpose: Ensure None content doesn't cause errors.
@@ -1462,12 +1462,12 @@ class TestExtractImagesFromToolMessage:
         content = None
 
         print("Action: Extracting images from tool message...")
-        result = _extract_images_from_tool_message(content)
+        result = await _extract_images_from_tool_message(content)
 
         print(f"Result: {result}")
         assert result == []
 
-    def test_extracts_images_mixed_with_text(self):
+    async def test_extracts_images_mixed_with_text(self):
         """
         What it does: Verifies images are extracted when mixed with text content.
         Purpose: Ensure images are found even when text blocks are present.
@@ -1483,7 +1483,7 @@ class TestExtractImagesFromToolMessage:
         ]
 
         print("Action: Extracting images from tool message...")
-        result = _extract_images_from_tool_message(content)
+        result = await _extract_images_from_tool_message(content)
 
         print(f"Result: {result}")
         assert len(result) == 1
@@ -1493,7 +1493,7 @@ class TestExtractImagesFromToolMessage:
 class TestConvertOpenAIMessagesWithToolImages:
     """Tests for convert_openai_messages_to_unified with tool message images."""
 
-    def test_extracts_images_from_tool_messages(self):
+    async def test_extracts_images_from_tool_messages(self):
         """
         What it does: Verifies images are extracted from tool messages and added to unified message.
         Purpose: Ensure tool message images are properly converted to unified format.
@@ -1524,7 +1524,7 @@ class TestConvertOpenAIMessagesWithToolImages:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Unified messages: {len(unified)}")
         print(f"Last message images: {unified[-1].images}")
@@ -1540,7 +1540,7 @@ class TestConvertOpenAIMessagesWithToolImages:
         assert len(unified[-1].images) == 1
         assert unified[-1].images[0]["data"] == "test_image"
 
-    def test_merges_images_from_multiple_tool_messages(self):
+    async def test_merges_images_from_multiple_tool_messages(self):
         """
         What it does: Verifies images from multiple tool messages are merged.
         Purpose: Ensure all tool message images are collected into one user message.
@@ -1564,7 +1564,7 @@ class TestConvertOpenAIMessagesWithToolImages:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Unified messages: {len(unified)}")
         print(f"Images count: {len(unified[0].images) if unified[0].images else 0}")
@@ -1579,7 +1579,7 @@ class TestConvertOpenAIMessagesWithToolImages:
         assert unified[0].images[0]["data"] == "image1"
         assert unified[0].images[1]["data"] == "image2"
 
-    def test_handles_tool_message_with_text_and_image(self):
+    async def test_handles_tool_message_with_text_and_image(self):
         """
         What it does: Verifies tool message with both text and image is handled correctly.
         Purpose: Ensure both text and images are extracted from tool messages.
@@ -1601,7 +1601,7 @@ class TestConvertOpenAIMessagesWithToolImages:
         ]
 
         print("Action: Converting messages...")
-        system_prompt, unified = convert_openai_messages_to_unified(messages)
+        system_prompt, unified = await convert_openai_messages_to_unified(messages)
 
         print(f"Unified messages: {len(unified)}")
 
@@ -1765,7 +1765,7 @@ class TestExtractThinkingConfigFromOpenAI:
 class TestBuildKiroPayloadIntegration:
     """Integration tests for build_kiro_payload with thinking config."""
 
-    def test_supported_model_sends_native_effort(self, monkeypatch):
+    async def test_supported_model_sends_native_effort(self, monkeypatch):
         """
         What it does: Verifies effort on a schema-supported model produces additionalModelRequestFields
         Purpose: Ensure native effort is sent without fabricating a numeric budget
@@ -1781,7 +1781,7 @@ class TestBuildKiroPayloadIntegration:
         )
 
         print("Calling build_kiro_payload...")
-        payload = build_kiro_payload(
+        payload = await build_kiro_payload(
             request_data=request,
             conversation_id="test-conv-123",
             profile_arn="arn:aws:test"
@@ -1798,7 +1798,7 @@ class TestBuildKiroPayloadIntegration:
         assert "<thinking_effort>" not in content
         assert "<max_thinking_length>" not in content
 
-    def test_unsupported_model_falls_back_to_effort_tag(self, monkeypatch):
+    async def test_unsupported_model_falls_back_to_effort_tag(self, monkeypatch):
         """
         What it does: Verifies effort on an unsupported model uses the XML tag path
         Purpose: Ensure legacy models keep working without native fields
@@ -1814,7 +1814,7 @@ class TestBuildKiroPayloadIntegration:
         )
 
         print("Calling build_kiro_payload...")
-        payload = build_kiro_payload(
+        payload = await build_kiro_payload(
             request_data=request,
             conversation_id="test-conv-123",
             profile_arn="arn:aws:test"
@@ -1831,7 +1831,7 @@ class TestBuildKiroPayloadIntegration:
         # concrete numeric budget tag would indicate the legacy budget path
         assert "<max_thinking_length>4000</max_thinking_length>" not in content
 
-    def test_gpt_model_receives_native_none_when_disabled(self, monkeypatch):
+    async def test_gpt_model_receives_native_none_when_disabled(self, monkeypatch):
         """
         What it does: Verifies reasoning_effort='none' on gpt-5.5 sends reasoning.effort=none
         Purpose: Ensure GPT models receive the native disable signal
@@ -1847,7 +1847,7 @@ class TestBuildKiroPayloadIntegration:
         )
 
         print("Calling build_kiro_payload...")
-        payload = build_kiro_payload(
+        payload = await build_kiro_payload(
             request_data=request,
             conversation_id="test-conv-123",
             profile_arn="arn:aws:test"
@@ -1866,7 +1866,7 @@ class TestBuildKiroPayloadIntegration:
 class TestStrictOpenAIToolChoiceIntegration:
     """Tests for strict OpenAI tool-choice payload integration."""
 
-    def test_named_choice_filters_payload_tools(self):
+    async def test_named_choice_filters_payload_tools(self):
         request = ChatCompletionRequest(
             model="claude-sonnet-4.5",
             messages=[ChatMessage(role="user", content="Read the file")],
@@ -1878,7 +1878,7 @@ class TestStrictOpenAIToolChoiceIntegration:
         )
 
         policy, selected, allowed = resolve_openai_tool_choice(request)
-        payload = build_kiro_payload(request, "strict-openai", "")
+        payload = await build_kiro_payload(request, "strict-openai", "")
         user_input = payload["conversationState"]["currentMessage"]["userInputMessage"]
         specifications = user_input["userInputMessageContext"]["tools"]
 

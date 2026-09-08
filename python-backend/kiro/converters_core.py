@@ -30,10 +30,15 @@ The core layer provides a unified interface that API-specific adapters use
 to convert their formats to Kiro API format.
 """
 
+import base64
+import ipaddress
 import json
+import socket
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+from urllib.parse import urlparse
 
+import httpx
 from loguru import logger
 
 from kiro.config import (
@@ -46,6 +51,12 @@ from kiro.config import (
     NATIVE_EFFORT_ENABLED,
     NATIVE_EFFORT_NONE_ON_DISABLED,
     NATIVE_EFFORT_SUPPRESS_TAGS,
+    FETCH_IMAGE_URLS,
+    FETCH_IMAGE_URL_TIMEOUT,
+    FETCH_IMAGE_URL_MAX_BYTES,
+    FETCH_IMAGE_URL_MAX_COUNT,
+    FETCH_IMAGE_URL_ALLOWED_HOSTS,
+    FETCH_IMAGE_URL_ALLOWED_IP_RANGES,
 )
 from kiro.effort_schema import (
     NATIVE_EFFORT_FIELD,
@@ -54,6 +65,250 @@ from kiro.effort_schema import (
 )
 from kiro.request_audit import RequestAudit
 from kiro.payload_guards import check_payload_size, trim_payload_to_limit
+
+
+# ==================================================================================================
+# SSRF-Safe Image URL Fetching
+# ==================================================================================================
+
+def _parse_allowed_ip_networks() -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
+    """
+    Parses the operator-configured CIDR allowlist once, at import time.
+
+    Invalid entries are logged and skipped rather than raising, so one typo in
+    the environment cannot prevent the gateway from starting. Validation lives
+    here because config.py has no logger.
+
+    Returns:
+        List of parsed networks; empty when nothing is configured
+    """
+    networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
+    for cidr in FETCH_IMAGE_URL_ALLOWED_IP_RANGES:
+        try:
+            networks.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError as e:
+            logger.warning(f"Ignoring invalid FETCH_IMAGE_URL_ALLOWED_IP_RANGES entry {cidr!r}: {e}")
+    if networks:
+        logger.info(
+            "Image URL fetching permits extra IP ranges: "
+            + ", ".join(str(n) for n in networks)
+        )
+    return networks
+
+
+_ALLOWED_IP_NETWORKS = _parse_allowed_ip_networks()
+
+
+def _is_blocked_ip(ip_str: str) -> bool:
+    """
+    Checks whether an IP address must never be reached by a server-side fetch.
+
+    Blocks private, loopback, link-local (including the 169.254.169.254 cloud
+    metadata address), multicast, reserved, and unspecified ranges for both
+    IPv4 and IPv6.
+
+    An address inside FETCH_IMAGE_URL_ALLOWED_IP_RANGES is permitted even when
+    it would otherwise be blocked: that is an explicit operator override, used
+    for example to allow a fake-ip proxy's 198.18.0.0/15 placeholders.
+
+    Args:
+        ip_str: IP address as a string (e.g. "127.0.0.1")
+
+    Returns:
+        True if the address is in a blocked range
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        # Unparseable address cannot be proven safe: fail closed.
+        return True
+
+    for network in _ALLOWED_IP_NETWORKS:
+        if ip.version == network.version and ip in network:
+            return False
+
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _resolve_and_validate_host(hostname: str) -> None:
+    """
+    Resolves a hostname and raises if any resolved address is blocked.
+
+    Validates at the resolved-IP level rather than by string-matching the
+    hostname, so a name like "internal.example.com" that happens to resolve
+    to a private address is still caught.
+
+    A hostname listed in FETCH_IMAGE_URL_ALLOWED_HOSTS skips resolution and the
+    IP check entirely. That is an explicit operator trust decision, needed for
+    fake-ip proxy setups where every name resolves to a placeholder address.
+    Only the IP check is skipped: the caller still enforces the scheme
+    allowlist, the redirect ban and the size limits.
+
+    Args:
+        hostname: Hostname to resolve and validate
+
+    Raises:
+        ValueError: If DNS resolution fails, or if any resolved address
+            falls in a blocked range (see _is_blocked_ip)
+    """
+    # "host." and "host" are the same name in DNS.
+    normalized = hostname.strip().lower().rstrip(".")
+    if normalized in FETCH_IMAGE_URL_ALLOWED_HOSTS:
+        logger.debug(f"Host {normalized} is allowlisted; skipping resolved-IP check")
+        return
+
+    try:
+        addrs = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as e:
+        raise ValueError(f"DNS resolution failed for {hostname}: {e}")
+
+    for _family, _type, _proto, _canonname, sockaddr in addrs:
+        ip_str = sockaddr[0]
+        if _is_blocked_ip(ip_str):
+            raise ValueError(f"Resolved address {ip_str} for {hostname} is not allowed")
+
+
+async def fetch_image_as_base64(url: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches a client-supplied image URL server-side and returns base64 data.
+
+    Kiro API only accepts inline base64 images, so a URL-based image must be
+    fetched and re-encoded before it reaches the payload. Because the URL
+    comes from an authenticated but not necessarily trusted caller, SSRF
+    protection is unconditional: scheme allowlist, DNS-resolved IP blocking
+    against private/loopback/link-local/reserved ranges, and no redirect
+    following (a redirect to a blocked address must not be a bypass).
+
+    Never raises. A bad image URL should not fail the whole request, so every
+    rejection path logs a warning and returns None instead.
+
+    Args:
+        url: Client-supplied image URL (http:// or https://)
+
+    Returns:
+        {"media_type": "image/jpeg", "data": "<base64>"} on success, or None
+        if the URL is rejected, unreachable, too large, or fetch fails
+    """
+    try:
+        parsed = urlparse(url)
+        scheme, hostname = parsed.scheme, parsed.hostname
+    except ValueError as e:
+        # urlparse rejects some malformed input outright, e.g. "http://[bad"
+        logger.warning(f"Rejected malformed image URL: {e}")
+        return None
+
+    if scheme not in ("http", "https") or not hostname:
+        logger.warning(f"Rejected image URL scheme/host: {url[:80]}")
+        return None
+
+    try:
+        _resolve_and_validate_host(hostname)
+    except ValueError as e:
+        logger.warning(f"Rejected image URL: {e}")
+        return None
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(FETCH_IMAGE_URL_TIMEOUT),
+            follow_redirects=False,
+        ) as client:
+            async with client.stream("GET", url) as response:
+                if response.status_code != 200:
+                    logger.warning(f"Image URL fetch got HTTP {response.status_code}: {url[:80]}")
+                    return None
+
+                # A malformed Content-Length must not raise: the streaming
+                # counter below enforces the real limit regardless.
+                content_length = response.headers.get("content-length")
+                if content_length:
+                    try:
+                        declared_bytes = int(content_length)
+                    except (TypeError, ValueError):
+                        declared_bytes = None
+                    if declared_bytes is not None and declared_bytes > FETCH_IMAGE_URL_MAX_BYTES:
+                        logger.warning(f"Image URL exceeds size limit: {url[:80]}")
+                        return None
+
+                media_type = response.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+
+                chunks: List[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > FETCH_IMAGE_URL_MAX_BYTES:
+                        logger.warning(f"Image URL exceeded size limit while streaming: {url[:80]}")
+                        return None
+                    chunks.append(chunk)
+
+                data = base64.b64encode(b"".join(chunks)).decode("ascii")
+                return {"media_type": media_type, "data": data}
+    except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError) as e:
+        logger.warning(f"Image URL fetch failed: {e}")
+        return None
+
+
+@dataclass
+class ImageFetchBudget:
+    """
+    Bounds server-side image URL fetching for the scope it is shared across.
+
+    Two protections, both needed because the URLs come from a caller that holds
+    the proxy key but is not otherwise trusted:
+
+    - Deduplication: a URL is fetched at most once. Conversation history is
+      re-converted on every turn, so without this the same image is re-fetched
+      for the whole life of a conversation.
+    - Count cap: at most max_count fetches. One request listing N URLs would
+      otherwise cost N sequential outbound requests, letting a single caller
+      occupy a worker for minutes.
+
+    A failed fetch is cached as None, so a broken URL is attempted once and
+    consumes exactly one unit of budget instead of being retried per mention.
+
+    Attributes:
+        max_count: Maximum fetches allowed; defaults to FETCH_IMAGE_URL_MAX_COUNT
+        cache: URL to fetch result (None for a URL that failed)
+        fetch_count: Fetches attempted so far
+    """
+    max_count: int = field(default_factory=lambda: FETCH_IMAGE_URL_MAX_COUNT)
+    cache: Dict[str, Optional[Dict[str, Any]]] = field(default_factory=dict)
+    fetch_count: int = 0
+    _cap_reported: bool = False
+
+    async def fetch(self, url: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetches an image URL unless it is cached or the budget is exhausted.
+
+        Args:
+            url: Client-supplied image URL
+
+        Returns:
+            Image dict as returned by fetch_image_as_base64, or None if the
+            fetch failed, was previously known to fail, or was refused
+        """
+        if url in self.cache:
+            return self.cache[url]
+
+        if self.fetch_count >= self.max_count:
+            if not self._cap_reported:
+                self._cap_reported = True
+                logger.warning(
+                    f"Image URL fetch limit reached ({self.max_count}); "
+                    f"skipping remaining URL images in this request"
+                )
+            return None
+
+        self.fetch_count += 1
+        result = await fetch_image_as_base64(url)
+        self.cache[url] = result
+        return result
 
 
 # ==================================================================================================
@@ -283,7 +538,10 @@ def extract_text_content(content: Any) -> str:
     return str(content)
 
 
-def extract_images_from_content(content: Any) -> List[Dict[str, Any]]:
+async def extract_images_from_content(
+    content: Any,
+    budget: Optional["ImageFetchBudget"] = None,
+) -> List[Dict[str, Any]]:
     """
     Extracts images from message content in unified format.
     
@@ -295,21 +553,37 @@ def extract_images_from_content(content: Any) -> List[Dict[str, Any]]:
     Anthropic format (image with source):
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "/9j/..."}}
     
+    URL-based images (either format) are fetched server-side and inlined as
+    base64 when FETCH_IMAGE_URLS is enabled (the default) — see
+    fetch_image_as_base64. When disabled, they are skipped with a warning,
+    same as before this behavior existed.
+    
+    This is a coroutine because fetching a URL-based image requires an
+    outbound HTTP request.
+    
     Args:
         content: Content in any supported format (usually a list of content blocks)
+        budget: Shared ImageFetchBudget giving request-wide deduplication and a
+            request-wide fetch cap. When omitted, a fresh budget scoped to this
+            single call is used, so the call is still bounded but shares no
+            state with the rest of the request.
     
     Returns:
         List of images in unified format: [{"media_type": "image/jpeg", "data": "base64..."}]
         Empty list if no images found or content is not a list.
     
     Example:
-        >>> extract_images_from_content([{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc123"}}])
+        >>> import asyncio
+        >>> asyncio.run(extract_images_from_content([{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc123"}}]))
         [{'media_type': 'image/png', 'data': 'abc123'}]
     """
     images: List[Dict[str, Any]] = []
     
     if not isinstance(content, list):
         return images
+    
+    if budget is None:
+        budget = ImageFetchBudget()
     
     for item in content:
         # Handle both dict and Pydantic model objects
@@ -350,8 +624,12 @@ def extract_images_from_content(content: Any) -> List[Dict[str, Any]]:
                 except (ValueError, IndexError) as e:
                     logger.warning(f"Failed to parse image data URL: {e}")
             elif url.startswith("http"):
-                # URL-based images require fetching - not supported by Kiro API directly
-                logger.warning(f"URL-based images are not supported by Kiro API, skipping: {url[:80]}...")
+                if FETCH_IMAGE_URLS:
+                    fetched = await budget.fetch(url)
+                    if fetched:
+                        images.append(fetched)
+                else:
+                    logger.warning(f"URL-based images are not supported by Kiro API, skipping: {url[:80]}...")
         
         # Anthropic format: {"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
         elif item_type == "image":
@@ -375,7 +653,12 @@ def extract_images_from_content(content: Any) -> List[Dict[str, Any]]:
                 elif source_type == "url":
                     # URL-based images in Anthropic format
                     url = source.get("url", "")
-                    logger.warning(f"URL-based images are not supported by Kiro API, skipping: {url[:80]}...")
+                    if FETCH_IMAGE_URLS:
+                        fetched = await budget.fetch(url)
+                        if fetched:
+                            images.append(fetched)
+                    else:
+                        logger.warning(f"URL-based images are not supported by Kiro API, skipping: {url[:80]}...")
             
             # Handle Pydantic model objects (ImageContentBlock.source)
             elif hasattr(source, "type"):
@@ -390,7 +673,12 @@ def extract_images_from_content(content: Any) -> List[Dict[str, Any]]:
                         })
                 elif source.type == "url":
                     url = getattr(source, "url", "")
-                    logger.warning(f"URL-based images are not supported by Kiro API, skipping: {url[:80]}...")
+                    if FETCH_IMAGE_URLS:
+                        fetched = await budget.fetch(url)
+                        if fetched:
+                            images.append(fetched)
+                    else:
+                        logger.warning(f"URL-based images are not supported by Kiro API, skipping: {url[:80]}...")
     
     if images:
         logger.debug(f"Extracted {len(images)} image(s) from content")
@@ -1506,7 +1794,11 @@ def ensure_alternating_roles(messages: List[UnifiedMessage]) -> List[UnifiedMess
 # Kiro History Building
 # ==================================================================================================
 
-def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Dict[str, Any]]:
+async def build_kiro_history(
+    messages: List[UnifiedMessage],
+    model_id: str,
+    budget: Optional["ImageFetchBudget"] = None,
+) -> List[Dict[str, Any]]:
     """
     Builds history array for Kiro API from unified messages.
     
@@ -1519,11 +1811,18 @@ def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Di
     Args:
         messages: List of messages in unified format (with normalized roles)
         model_id: Internal Kiro model ID
+        budget: Shared ImageFetchBudget passed down to image extraction, so a
+            URL image repeated across history turns is fetched only once
     
     Returns:
         List of dictionaries for history field in Kiro API
     """
     history = []
+    
+    # Own a budget when none was shared, so dedup and the cap span the whole
+    # history instead of resetting on every message.
+    if budget is None:
+        budget = ImageFetchBudget()
     
     for msg in messages:
         if msg.role == "user":
@@ -1542,7 +1841,7 @@ def build_kiro_history(messages: List[UnifiedMessage], model_id: str) -> List[Di
             # Process images - extract from message or content
             # IMPORTANT: images go directly into userInputMessage, NOT into userInputMessageContext
             # This matches the native Kiro IDE format
-            images = msg.images or extract_images_from_content(msg.content)
+            images = msg.images or await extract_images_from_content(msg.content, budget)
             if images:
                 kiro_images = convert_images_to_kiro_format(images)
                 if kiro_images:
@@ -1626,7 +1925,7 @@ def build_tool_choice_directive(
     return ""
 
 
-def build_kiro_payload(
+async def build_kiro_payload(
     messages: List[UnifiedMessage],
     system_prompt: str,
     model_id: str,
@@ -1636,6 +1935,7 @@ def build_kiro_payload(
     thinking_config: ThinkingConfig,
     native_thinking: Optional[Dict[str, Any]] = None,
     request_audit: Optional[RequestAudit] = None,
+    budget: Optional["ImageFetchBudget"] = None,
 ) -> KiroPayloadResult:
     """
     Builds complete payload for Kiro API from unified data.
@@ -1652,6 +1952,10 @@ def build_kiro_payload(
         profile_arn: AWS CodeWhisperer profile ARN
         thinking_config: Thinking configuration from API adapter
         native_thinking: Anthropic adaptive thinking dictionary to forward verbatim
+        request_audit: Optional request audit state shared with the response stream
+        budget: Shared ImageFetchBudget covering both history and the current
+            message, so one request cannot exceed the URL fetch cap and repeated
+            URLs are fetched once
 
     Returns:
         KiroPayloadResult with payload and tool documentation
@@ -1659,6 +1963,11 @@ def build_kiro_payload(
     Raises:
         ValueError: If there are no messages to send
     """
+    # One budget for the whole payload: history and the current message share
+    # the fetch cap and the dedup cache.
+    if budget is None:
+        budget = ImageFetchBudget()
+    
     # Process tools with long descriptions
     processed_tools, tool_documentation = process_tools_with_long_descriptions(tools)
     
@@ -1765,7 +2074,7 @@ def build_kiro_payload(
             original_content = extract_text_content(first_msg.content)
             first_msg.content = f"{full_system_prompt}\n\n{original_content}"
     
-    history = build_kiro_history(history_messages, model_id)
+    history = await build_kiro_history(history_messages, model_id, budget)
     
     # Current message (the last one)
     current_message = merged_messages[-1]
@@ -1792,7 +2101,7 @@ def build_kiro_payload(
     # Process images in current message - extract from message or content
     # IMPORTANT: images go directly into userInputMessage, NOT into userInputMessageContext
     # This matches the native Kiro IDE format
-    images = current_message.images or extract_images_from_content(current_message.content)
+    images = current_message.images or await extract_images_from_content(current_message.content, budget)
     kiro_images = None
     if images:
         kiro_images = convert_images_to_kiro_format(images)

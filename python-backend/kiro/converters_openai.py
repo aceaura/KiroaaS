@@ -52,6 +52,7 @@ from kiro.converters_core import (
     UnifiedTool,
     ThinkingConfig,
     ToolChoicePolicy,
+    ImageFetchBudget,
     build_kiro_payload as core_build_kiro_payload,
     parse_tool_choice_policy,
 )
@@ -86,7 +87,10 @@ def _extract_tool_results_from_openai(content: Any) -> List[Dict[str, Any]]:
     return tool_results
 
 
-def _extract_images_from_tool_message(content: Any) -> List[Dict[str, Any]]:
+async def _extract_images_from_tool_message(
+    content: Any,
+    budget: Optional[ImageFetchBudget] = None,
+) -> List[Dict[str, Any]]:
     """
     Extracts images from OpenAI tool message content.
     
@@ -95,16 +99,19 @@ def _extract_images_from_tool_message(content: Any) -> List[Dict[str, Any]]:
     
     Args:
         content: Tool message content (can be string or list of content blocks)
+        budget: Shared ImageFetchBudget, so URL images inside tool messages count
+            against the same request-wide fetch cap as everything else
     
     Returns:
         List of images in unified format: [{"media_type": "image/jpeg", "data": "base64..."}]
     
     Example:
+        >>> import asyncio
         >>> content = [
         ...     {"type": "text", "text": "Screenshot captured"},
         ...     {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
         ... ]
-        >>> images = _extract_images_from_tool_message(content)
+        >>> images = asyncio.run(_extract_images_from_tool_message(content))
         >>> len(images)
         1
     """
@@ -113,7 +120,7 @@ def _extract_images_from_tool_message(content: Any) -> List[Dict[str, Any]]:
         return []
     
     # Use core function to extract images from content list
-    images = extract_images_from_content(content)
+    images = await extract_images_from_content(content, budget)
     
     if images:
         logger.debug(f"Extracted {len(images)} image(s) from tool message content")
@@ -148,7 +155,10 @@ def _extract_tool_calls_from_openai(msg: ChatMessage) -> List[Dict[str, Any]]:
     return tool_calls
 
 
-def convert_openai_messages_to_unified(messages: List[ChatMessage]) -> Tuple[str, List[UnifiedMessage]]:
+async def convert_openai_messages_to_unified(
+    messages: List[ChatMessage],
+    budget: Optional[ImageFetchBudget] = None,
+) -> Tuple[str, List[UnifiedMessage]]:
     """
     Converts OpenAI messages to unified format.
     
@@ -159,6 +169,8 @@ def convert_openai_messages_to_unified(messages: List[ChatMessage]) -> Tuple[str
     
     Args:
         messages: List of OpenAI ChatMessage objects
+        budget: Shared ImageFetchBudget, so URL images across all messages count
+            against one request-wide fetch cap and repeats are fetched once
     
     Returns:
         Tuple of (system_prompt, unified_messages)
@@ -195,7 +207,7 @@ def convert_openai_messages_to_unified(messages: List[ChatMessage]) -> Tuple[str
             total_tool_results += 1
             
             # Extract images from tool message content (e.g., screenshots from MCP tools)
-            tool_images = _extract_images_from_tool_message(msg.content)
+            tool_images = await _extract_images_from_tool_message(msg.content, budget)
             if tool_images:
                 pending_tool_images.extend(tool_images)
                 total_images += len(tool_images)
@@ -226,7 +238,7 @@ def convert_openai_messages_to_unified(messages: List[ChatMessage]) -> Tuple[str
                 if tool_results:
                     total_tool_results += len(tool_results)
                 # Extract images from user messages
-                images = extract_images_from_content(msg.content) or None
+                images = await extract_images_from_content(msg.content, budget) or None
                 if images:
                     total_images += len(images)
 
@@ -365,7 +377,7 @@ def resolve_openai_first_token_timeout(request: ChatCompletionRequest) -> float:
 # Main Entry Point
 # ==================================================================================================
 
-def build_kiro_payload(
+async def build_kiro_payload(
     request_data: ChatCompletionRequest,
     conversation_id: str,
     profile_arn: str,
@@ -389,8 +401,14 @@ def build_kiro_payload(
     Raises:
         ValueError: If there are no messages to send
     """
+    # One budget for the request: message conversion and payload building both
+    # extract images, so they must share the cap and the dedup cache.
+    image_budget = ImageFetchBudget()
+
     # Convert messages to unified format
-    system_prompt, unified_messages = convert_openai_messages_to_unified(request_data.messages)
+    system_prompt, unified_messages = await convert_openai_messages_to_unified(
+        request_data.messages, image_budget
+    )
 
     # Resolve against original client-visible names before extension aliasing.
     tool_choice_policy, unified_tools, _ = resolve_openai_tool_choice(request_data)
@@ -415,7 +433,7 @@ def build_kiro_payload(
     )
     
     # Use core function to build payload
-    result = core_build_kiro_payload(
+    result = await core_build_kiro_payload(
         messages=unified_messages,
         system_prompt=system_prompt,
         model_id=model_id,
@@ -424,6 +442,7 @@ def build_kiro_payload(
         profile_arn=profile_arn,
         thinking_config=thinking_config,
         request_audit=request_audit,
+        budget=image_budget,
     )
     
     return result.payload

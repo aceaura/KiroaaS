@@ -591,6 +591,71 @@ GPT_EDIT_RECOVERY: bool = os.getenv("GPT_EDIT_RECOVERY", "false").lower() in ("t
 WEB_SEARCH_ENABLED: bool = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
 
 # ==================================================================================================
+# Image URL Fetching Settings
+# ==================================================================================================
+
+# Fetch client-supplied image URLs server-side and inline them as base64
+# (default: true). Kiro API only accepts base64 images; without this, a URL
+# image is silently dropped from the request.
+#
+# SSRF protection (scheme allowlist, private/loopback/link-local IP blocking,
+# no-redirect) is always enforced and cannot be disabled by this flag.
+FETCH_IMAGE_URLS: bool = os.getenv("FETCH_IMAGE_URLS", "true").lower() in ("true", "1", "yes")
+
+# Timeout for a single image URL fetch, in seconds.
+FETCH_IMAGE_URL_TIMEOUT: float = float(os.getenv("FETCH_IMAGE_URL_TIMEOUT", "10"))
+
+# Maximum bytes read from a single image URL response. Enforced against both
+# Content-Length and actual bytes streamed, so a server lying about its
+# Content-Length can't be used to exhaust memory.
+#
+# The default is sized against KIRO_MAX_PAYLOAD_BYTES: base64 inflates bytes by
+# ~4/3, so 400000 raw bytes become ~533KB, which is the largest single image
+# that can still fit a 600KB payload alongside any text. Fetching more than the
+# payload can carry only wastes time and memory, since AUTO_TRIM_PAYLOAD is off
+# by default and the oversized payload is rejected outright.
+FETCH_IMAGE_URL_MAX_BYTES: int = int(os.getenv("FETCH_IMAGE_URL_MAX_BYTES", "400000"))
+
+# Maximum number of URL images fetched per request (default: 10).
+#
+# Bounds fetch amplification: without it, a single request listing N URLs makes
+# the server perform N sequential outbound fetches, letting one caller occupy a
+# worker for minutes. URLs beyond the cap are skipped with a warning.
+FETCH_IMAGE_URL_MAX_COUNT: int = int(os.getenv("FETCH_IMAGE_URL_MAX_COUNT", "10"))
+
+# Hostnames allowed to skip the resolved-IP check (comma-separated, default none).
+#
+# Needed for fake-ip proxy setups (Clash, Surge and similar): there every
+# hostname resolves to a 198.18.0.0/15 placeholder address, so DNS-based IP
+# validation blocks all legitimate traffic while providing no real protection,
+# since the proxy - not the resolved IP - decides the true destination.
+#
+# Matching is exact and case-insensitive on the URL hostname. Listed hosts are
+# still subject to the scheme allowlist, the redirect ban and the size limits;
+# only the IP-range check is skipped. Adding an entry is an explicit trust
+# decision about that host.
+FETCH_IMAGE_URL_ALLOWED_HOSTS: List[str] = [
+    host.strip().lower()
+    for host in os.getenv("FETCH_IMAGE_URL_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+]
+
+# Extra CIDR ranges treated as fetchable even though they would normally be
+# rejected as private or reserved (comma-separated, default none).
+#
+# Example: 198.18.0.0/15 to permit the placeholder addresses a fake-ip proxy
+# hands out. Widening this weakens SSRF protection - prefer
+# FETCH_IMAGE_URL_ALLOWED_HOSTS, which grants trust per host instead of to a
+# whole address range.
+#
+# Entries are validated where a logger is available; config.py has none.
+FETCH_IMAGE_URL_ALLOWED_IP_RANGES: List[str] = [
+    cidr.strip()
+    for cidr in os.getenv("FETCH_IMAGE_URL_ALLOWED_IP_RANGES", "").split(",")
+    if cidr.strip()
+]
+
+# ==================================================================================================
 # Account System Settings
 # ==================================================================================================
 
