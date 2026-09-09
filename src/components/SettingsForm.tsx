@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { CheckCircle, Sparkles, X, Shuffle, Save, Shield, Key, Database, FileText, Network, Wifi, AlertTriangle, Brain, Box, Power, Wrench, Image } from 'lucide-react';
+import { CheckCircle, Sparkles, X, Shuffle, Save, Shield, Key, Database, FileText, Network, Wifi, AlertTriangle, Brain, Box, Power, Wrench } from 'lucide-react';
 import { Loader2 } from 'lucide-react';
 
 export type SettingsHintKey = 'auth_cli_db' | 'auth_creds_file' | 'auth_refresh_token' | 'proxy_api_key' | 'generate' | 'check_update' | 'save' | null;
@@ -528,25 +528,6 @@ export const SettingsForm = forwardRef<SettingsFormHandle, SettingsFormProps>(fu
                         <Switch
                             checked={formData.fake_reasoning}
                             onCheckedChange={(checked) => updateField('fake_reasoning', checked)}
-                        />
-                    </div>
-                </div>
-
-                <div className="bg-[#F8F8F8] p-6 rounded-[24px]">
-                    <div className="space-y-3">
-                        <div className="flex items-center gap-3">
-                            <Image className="h-5 w-5 text-stone-400" />
-                            <div>
-                                <Label className="text-sm font-semibold text-[#111]">{t('imageUrlAllowedHosts')}</Label>
-                                <p className="text-xs text-stone-500 mt-0.5">{t('imageUrlAllowedHostsDesc')}</p>
-                            </div>
-                        </div>
-                        <Input
-                            type="text"
-                            value={formData.fetch_image_url_allowed_hosts ?? ''}
-                            onChange={(e) => updateField('fetch_image_url_allowed_hosts', e.target.value)}
-                            className="h-12 rounded-xl bg-white border-stone-200 focus:ring-black focus:border-black font-mono text-sm"
-                            placeholder={t('imageUrlAllowedHostsPlaceholder')}
                         />
                     </div>
                 </div>

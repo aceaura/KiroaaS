@@ -84,9 +84,6 @@ export const translations = {
     vpnProxyUrl: 'VPN 代理地址',
     vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
     vpnProxyUrlDesc: '可选的 VPN 代理服务器地址',
-    imageUrlAllowedHosts: '图片 URL 放行主机',
-    imageUrlAllowedHostsDesc: '允许跳过 SSRF 地址校验的图床主机名（逗号分隔）。fake-ip 代理（Clash 等）下需在此列出图片域名，否则图片会被丢弃',
-    imageUrlAllowedHostsPlaceholder: 'qoder-cn-vl.oss-cn-beijing.aliyuncs.com, host2.example.com',
 
     timeoutSettings: '超时设置',
     firstTokenTimeout: '首个令牌超时 (秒)',
@@ -426,9 +423,6 @@ export const translations = {
     vpnProxyUrl: 'VPN Proxy URL',
     vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
     vpnProxyUrlDesc: 'Optional proxy server for VPN connections',
-    imageUrlAllowedHosts: 'Image URL Allowed Hosts',
-    imageUrlAllowedHostsDesc: 'Image hosts allowed to skip the SSRF resolved-IP check (comma-separated). Required behind fake-ip proxies (Clash and similar), otherwise URL images are dropped',
-    imageUrlAllowedHostsPlaceholder: 'qoder-cn-vl.oss-cn-beijing.aliyuncs.com, host2.example.com',
 
     timeoutSettings: 'Timeouts',
     firstTokenTimeout: 'First Token Timeout (seconds)',
@@ -770,9 +764,6 @@ export const translations = {
     vpnProxyUrl: 'URL VPN‑прокси',
     vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
     vpnProxyUrlDesc: 'Необязательный адрес прокси‑сервера для VPN',
-    imageUrlAllowedHosts: 'Разрешённые хосты изображений',
-    imageUrlAllowedHostsDesc: 'Хосты изображений, которым разрешено пропускать SSRF-проверку IP (через запятую). Требуется за fake-ip прокси (Clash и т.п.), иначе изображения по URL отбрасываются',
-    imageUrlAllowedHostsPlaceholder: 'qoder-cn-vl.oss-cn-beijing.aliyuncs.com, host2.example.com',
 
     timeoutSettings: 'Тайм‑ауты',
     firstTokenTimeout: 'Тайм‑аут первого токена (сек.)',
@@ -1116,9 +1107,6 @@ export const translations = {
     vpnProxyUrl: 'URL del proxy VPN',
     vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
     vpnProxyUrlDesc: 'Servidor proxy opcional para conexiones VPN',
-    imageUrlAllowedHosts: 'Hosts de imágenes permitidos',
-    imageUrlAllowedHostsDesc: 'Hosts de imágenes que pueden omitir la comprobación SSRF de IP resuelta (separados por comas). Necesario tras proxies fake-ip (Clash y similares); si no, las imágenes por URL se descartan',
-    imageUrlAllowedHostsPlaceholder: 'qoder-cn-vl.oss-cn-beijing.aliyuncs.com, host2.example.com',
 
     timeoutSettings: 'Tiempos de espera',
     firstTokenTimeout: 'Tiempo de espera del primer token (segundos)',
@@ -1462,9 +1450,6 @@ export const translations = {
     vpnProxyUrl: 'URL Proxy VPN',
     vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
     vpnProxyUrlDesc: 'Server proxy opsional untuk koneksi VPN',
-    imageUrlAllowedHosts: 'Host Gambar yang Diizinkan',
-    imageUrlAllowedHostsDesc: 'Host gambar yang boleh melewati pemeriksaan IP hasil resolve SSRF (dipisahkan koma). Diperlukan di balik proxy fake-ip (Clash dsb.), jika tidak gambar URL akan dibuang',
-    imageUrlAllowedHostsPlaceholder: 'qoder-cn-vl.oss-cn-beijing.aliyuncs.com, host2.example.com',
 
     timeoutSettings: 'Timeout',
     firstTokenTimeout: 'Timeout Token Pertama (detik)',
@@ -1808,9 +1793,6 @@ export const translations = {
     vpnProxyUrl: 'URL do proxy VPN',
     vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
     vpnProxyUrlDesc: 'Servidor proxy opcional para conexões VPN',
-    imageUrlAllowedHosts: 'Hosts de imagem permitidos',
-    imageUrlAllowedHostsDesc: 'Hosts de imagem que podem ignorar a verificação SSRF de IP resolvido (separados por vírgula). Necessário atrás de proxies fake-ip (Clash e similares); caso contrário, imagens por URL são descartadas',
-    imageUrlAllowedHostsPlaceholder: 'qoder-cn-vl.oss-cn-beijing.aliyuncs.com, host2.example.com',
 
     timeoutSettings: 'Timeouts',
     firstTokenTimeout: 'Timeout do primeiro token (segundos)',
@@ -2154,9 +2136,6 @@ export const translations = {
     vpnProxyUrl: 'VPN プロキシ URL',
     vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
     vpnProxyUrlDesc: 'VPN 接続用の任意のプロキシサーバー',
-    imageUrlAllowedHosts: '画像 URL 許可ホスト',
-    imageUrlAllowedHostsDesc: 'SSRF の解決 IP チェックをスキップできる画像ホスト（カンマ区切り）。fake-ip プロキシ（Clash 等）環境で必要。未設定だと URL 画像は破棄されます',
-    imageUrlAllowedHostsPlaceholder: 'qoder-cn-vl.oss-cn-beijing.aliyuncs.com, host2.example.com',
 
     timeoutSettings: 'タイムアウト',
     firstTokenTimeout: '最初のトークンのタイムアウト (秒)',
@@ -2500,9 +2479,6 @@ export const translations = {
     vpnProxyUrl: 'VPN 프록시 URL',
     vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
     vpnProxyUrlDesc: 'VPN 연결을 위한 선택적 프록시 서버',
-    imageUrlAllowedHosts: '이미지 URL 허용 호스트',
-    imageUrlAllowedHostsDesc: 'SSRF 확인된 IP 검사를 건너뛸 수 있는 이미지 호스트(쉼표로 구분). fake-ip 프록시(Clash 등) 환경에서 필요하며, 설정하지 않으면 URL 이미지가 삭제됩니다',
-    imageUrlAllowedHostsPlaceholder: 'qoder-cn-vl.oss-cn-beijing.aliyuncs.com, host2.example.com',
 
     timeoutSettings: '타임아웃',
     firstTokenTimeout: '첫 토큰 타임아웃(초)',
@@ -2846,9 +2822,6 @@ export const translations = {
     vpnProxyUrl: 'URL proxy VPN',
     vpnProxyUrlPlaceholder: 'http://proxy.example.com:8080',
     vpnProxyUrlDesc: 'Máy chủ proxy tùy chọn cho kết nối VPN',
-    imageUrlAllowedHosts: 'Máy chủ ảnh được phép',
-    imageUrlAllowedHostsDesc: 'Máy chủ ảnh được bỏ qua kiểm tra IP phân giải SSRF (phân tách bằng dấu phẩy). Cần thiết sau proxy fake-ip (Clash và tương tự), nếu không ảnh URL sẽ bị loại bỏ',
-    imageUrlAllowedHostsPlaceholder: 'qoder-cn-vl.oss-cn-beijing.aliyuncs.com, host2.example.com',
 
     timeoutSettings: 'Thời gian chờ',
     firstTokenTimeout: 'Thời gian chờ token đầu tiên (giây)',

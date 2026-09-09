@@ -28,7 +28,6 @@ export interface AppConfig {
   fake_reasoning: boolean;
   fake_reasoning_max_tokens: number;
   truncation_recovery: boolean;
-  fetch_image_url_allowed_hosts: string;
   log_level: string;
   debug_mode: string;
 
@@ -55,7 +54,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   fake_reasoning: true,
   fake_reasoning_max_tokens: 4000,
   truncation_recovery: true,
-  fetch_image_url_allowed_hosts: '',
   log_level: 'INFO',
   debug_mode: 'off',
   auto_launch: false,
