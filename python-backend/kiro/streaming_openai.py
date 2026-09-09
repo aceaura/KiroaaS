@@ -422,6 +422,12 @@ async def stream_kiro_to_openai_internal(
             f"total_tokens={total_tokens} ({total_source})"
         )
 
+        logger.info(
+            f"[OpenAI Streaming] Completed: model={model}, "
+            f"finish_reason={finish_reason}, tool_calls={len(all_tool_calls)}, "
+            f"output_tokens={completion_tokens}"
+        )
+
         yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -554,6 +560,12 @@ def format_openai_response_from_result(
         finish_reason = "length"
     else:
         finish_reason = "stop"
+
+    logger.info(
+        f"[OpenAI Non-Streaming] Completed: model={model}, "
+        f"finish_reason={finish_reason}, tool_calls={len(result.tool_calls)}, "
+        f"output_tokens={completion_tokens}"
+    )
 
     return {
         "id": generate_completion_id(),

@@ -710,8 +710,8 @@ async def stream_kiro_to_anthropic(
                     f"content={content_was_truncated}. Will be handled when client sends next request."
                 )
 
-        logger.debug(
-            f"[Anthropic Streaming] Completed: "
+        logger.info(
+            f"[Anthropic Streaming] Completed: model={model}, "
             f"input_tokens={input_tokens}, output_tokens={output_tokens}, "
             f"tool_blocks={len(tool_blocks)}, stop_reason={stop_reason}"
         )
@@ -827,8 +827,8 @@ def format_anthropic_response_from_result(
     else:
         stop_reason = "end_turn"
 
-    logger.debug(
-        f"[Anthropic Non-Streaming] Completed: "
+    logger.info(
+        f"[Anthropic Non-Streaming] Completed: model={model}, "
         f"input_tokens={input_tokens}, output_tokens={output_tokens}, "
         f"tool_calls={len(result.tool_calls)}, stop_reason={stop_reason}"
     )

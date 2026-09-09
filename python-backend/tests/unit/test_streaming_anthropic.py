@@ -1807,3 +1807,69 @@ class TestStreamingAnthropicTruncationDetection:
         # Should detect truncation and set max_tokens
         assert result["stop_reason"] == "max_tokens"
         print("✓ collect_anthropic_response detects truncation correctly")
+
+
+# ==================================================================================================
+# Tests for completion logging
+# ==================================================================================================
+
+@pytest.fixture
+def info_log_records():
+    """Capture loguru INFO+ records so log output can be asserted."""
+    from loguru import logger
+    records = []
+    sink_id = logger.add(lambda m: records.append(m.record), level="INFO")
+    yield records
+    logger.remove(sink_id)
+
+
+class TestCompletionLogging:
+    """stop_reason must be logged at INFO on both Anthropic response paths."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_logs_stop_reason_at_info(
+        self, mock_response, mock_model_cache, mock_auth_manager, info_log_records
+    ):
+        """
+        What it does: Streams a plain assistant turn and inspects the INFO logs.
+        Purpose: stop_reason is the key signal for distinguishing a
+            model-initiated end_turn from a transport cut, so it must be
+            visible without enabling DEBUG.
+        """
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="done")
+            yield KiroEvent(type="context_usage", context_usage_percentage=5.0)
+
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
+                async for _ in stream_kiro_to_anthropic(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                ):
+                    pass
+
+        completion_logs = [
+            r["message"] for r in info_log_records
+            if "[Anthropic Streaming] Completed" in r["message"]
+        ]
+        assert len(completion_logs) == 1
+        assert "model=claude-sonnet-4" in completion_logs[0]
+        assert "stop_reason=end_turn" in completion_logs[0]
+
+    def test_non_streaming_logs_stop_reason_at_info(self, mock_model_cache, info_log_records):
+        """
+        What it does: Formats a completed result and inspects the INFO logs.
+        Purpose: The non-streaming path must log the same completion summary.
+        """
+        format_anthropic_response_from_result(
+            StreamResult(content="complete", completed_normally=True),
+            "claude-sonnet-4",
+            mock_model_cache,
+        )
+
+        completion_logs = [
+            r["message"] for r in info_log_records
+            if "[Anthropic Non-Streaming] Completed" in r["message"]
+        ]
+        assert len(completion_logs) == 1
+        assert "model=claude-sonnet-4" in completion_logs[0]
+        assert "stop_reason=end_turn" in completion_logs[0]

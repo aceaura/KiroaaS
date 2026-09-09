@@ -1705,3 +1705,77 @@ class TestStreamingOpenaiGptChannel:
         final_chunk = json.loads(chunks[-2][len("data: "):])
         print(f"Final chunk usage: {final_chunk['usage']}")
         assert "credits_used" not in final_chunk["usage"]
+
+
+# ==================================================================================================
+# Tests for completion logging
+# ==================================================================================================
+
+@pytest.fixture
+def info_log_records():
+    """Capture loguru INFO+ records so log output can be asserted."""
+    from loguru import logger
+    records = []
+    sink_id = logger.add(lambda m: records.append(m.record), level="INFO")
+    yield records
+    logger.remove(sink_id)
+
+
+class TestCompletionLogging:
+    """finish_reason must be logged at INFO on both OpenAI response paths."""
+
+    @staticmethod
+    def _byte_stream(stream: bytes):
+        async def gen():
+            yield stream
+        return gen()
+
+    @pytest.mark.asyncio
+    async def test_streaming_logs_finish_reason_at_info(
+        self, mock_http_client, mock_response, mock_model_cache, mock_auth_manager,
+        info_log_records,
+    ):
+        """
+        What it does: Streams a plain assistant turn and inspects the INFO logs.
+        Purpose: finish_reason is the key signal for distinguishing a
+            model-initiated stop from a transport cut, so it must be visible
+            without enabling DEBUG.
+        """
+        stream = (
+            _aws_event_frame("assistantResponseEvent", {"content": "done"})
+            + _aws_event_frame("meteringEvent", {"inputTokens": 5, "usage": 0.01, "outputTokens": 2})
+        )
+        mock_response.aiter_bytes = lambda: self._byte_stream(stream)
+
+        async for _ in stream_kiro_to_openai(
+            mock_http_client, mock_response, "gpt-5.6-sol",
+            mock_model_cache, mock_auth_manager
+        ):
+            pass
+
+        completion_logs = [
+            r["message"] for r in info_log_records
+            if "[OpenAI Streaming] Completed" in r["message"]
+        ]
+        assert len(completion_logs) == 1
+        assert "model=gpt-5.6-sol" in completion_logs[0]
+        assert "finish_reason=stop" in completion_logs[0]
+
+    def test_non_streaming_logs_finish_reason_at_info(self, mock_model_cache, info_log_records):
+        """
+        What it does: Formats a completed result and inspects the INFO logs.
+        Purpose: The non-streaming path must log the same completion summary.
+        """
+        format_openai_response_from_result(
+            StreamResult(content="complete", completed_normally=True),
+            "gpt-5.6-sol",
+            mock_model_cache,
+        )
+
+        completion_logs = [
+            r["message"] for r in info_log_records
+            if "[OpenAI Non-Streaming] Completed" in r["message"]
+        ]
+        assert len(completion_logs) == 1
+        assert "model=gpt-5.6-sol" in completion_logs[0]
+        assert "finish_reason=stop" in completion_logs[0]
