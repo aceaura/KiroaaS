@@ -37,7 +37,7 @@ Example:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from loguru import logger
 
@@ -139,3 +139,47 @@ def enhance_kiro_error(error_json: Dict[str, Any]) -> KiroErrorInfo:
         user_message=user_message,
         original_message=original_message
     )
+
+
+# Character budget for the message portion of a one-line HTTP error log entry.
+ERROR_LOG_MESSAGE_BUDGET: int = 100
+
+
+def summarize_upstream_error(
+    status_code: int,
+    endpoint: str,
+    error_message: str,
+    reason: Optional[str],
+) -> str:
+    """
+    Format a one-line HTTP error log entry, preserving the reason code.
+
+    The message portion is truncated to ERROR_LOG_MESSAGE_BUDGET characters,
+    but the upstream reason code (e.g. "MODEL_TEMPORARILY_UNAVAILABLE") is
+    always appended in full: it is the actionable signal for deciding between
+    retry and giving up, and naive truncation tends to cut exactly that part.
+
+    If error_message already ends with the "(reason: X)" suffix (produced by
+    enhance_kiro_error for unmapped errors), the suffix is detached first so
+    it is neither duplicated nor truncated.
+
+    Args:
+        status_code: HTTP status code returned to the client.
+        endpoint: Endpoint path for context (e.g. "/v1/messages").
+        error_message: Full upstream error message (untruncated).
+        reason: Upstream reason code, or None when unavailable (e.g. the
+            error body was not JSON).
+
+    Returns:
+        Log line of the form "HTTP {status} - POST {endpoint} - {message}"
+        with " (reason: {reason})" appended when a reason is available.
+
+    Example:
+        >>> summarize_upstream_error(500, "/v1/messages", "x" * 200, "MODEL_TEMPORARILY_UNAVAILABLE")
+        'HTTP 500 - POST /v1/messages - xxxx...(reason: MODEL_TEMPORARILY_UNAVAILABLE)'
+    """
+    suffix = f" (reason: {reason})" if reason else ""
+    if reason and error_message.endswith(suffix):
+        error_message = error_message[: -len(suffix)]
+    budget = max(0, ERROR_LOG_MESSAGE_BUDGET - len(suffix))
+    return f"HTTP {status_code} - POST {endpoint} - {error_message[:budget]}{suffix}"

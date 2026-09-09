@@ -593,7 +593,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
                             response.status_code, error_reason
                         )
 
-                        logger.warning(f"HTTP {response.status_code} - POST /v1/chat/completions - {last_error_message[:100]}")
+                        from kiro.kiro_errors import summarize_upstream_error
+                        logger.warning(summarize_upstream_error(
+                            response.status_code, "/v1/chat/completions", last_error_message, error_reason
+                        ))
 
                         if debug_logger:
                             debug_logger.flush_on_error(response.status_code, last_error_message)
@@ -749,21 +752,24 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
 
             # Try to parse JSON response from Kiro to extract error message
             error_message = error_text
+            error_reason = None
             try:
                 error_json = json.loads(error_text)
                 # Enhance Kiro API errors with user-friendly messages
                 from kiro.kiro_errors import enhance_kiro_error
                 error_info = enhance_kiro_error(error_json)
                 error_message = error_info.user_message
+                error_reason = error_info.reason
                 # Log original error for debugging
                 logger.debug(f"Original Kiro error: {error_info.original_message} (reason: {error_info.reason})")
             except (json.JSONDecodeError, KeyError):
                 pass
 
             # Log access log for error (before flush, so it gets into app_logs)
-            logger.warning(
-                f"HTTP {response.status_code} - POST /v1/chat/completions - {error_message[:100]}"
-            )
+            from kiro.kiro_errors import summarize_upstream_error
+            logger.warning(summarize_upstream_error(
+                response.status_code, "/v1/chat/completions", error_message, error_reason
+            ))
 
             # Flush debug logs on error ("errors" mode)
             if debug_logger:

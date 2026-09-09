@@ -35,6 +35,10 @@ pub struct AppConfig {
     pub fake_reasoning: bool,
     pub fake_reasoning_max_tokens: u32,
     pub truncation_recovery: bool,
+    // Comma-separated image hosts allowed to skip the SSRF resolved-IP check
+    // (passed through to the backend as FETCH_IMAGE_URL_ALLOWED_HOSTS).
+    #[serde(default)]
+    pub fetch_image_url_allowed_hosts: String,
     pub log_level: String,
     pub debug_mode: String,
 
@@ -76,6 +80,7 @@ impl Default for AppConfig {
             fake_reasoning: true,
             fake_reasoning_max_tokens: 4000,
             truncation_recovery: true,
+            fetch_image_url_allowed_hosts: String::new(),
             log_level: "INFO".to_string(),
             debug_mode: "off".to_string(),
             auto_launch: false,

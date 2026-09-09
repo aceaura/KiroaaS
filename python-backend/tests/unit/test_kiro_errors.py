@@ -9,7 +9,9 @@ import pytest
 
 from kiro.kiro_errors import (
     KiroErrorInfo,
-    enhance_kiro_error
+    enhance_kiro_error,
+    summarize_upstream_error,
+    ERROR_LOG_MESSAGE_BUDGET,
 )
 
 
@@ -625,3 +627,105 @@ class TestEnhanceImproperlyFormedRequest:
 
         # Should fall through to generic handler, not the size-limit message
         assert "payload size exceeded" not in error_info.user_message
+
+
+class TestSummarizeUpstreamError:
+    """Tests for summarize_upstream_error() one-line HTTP error log formatting."""
+
+    def test_reason_survives_truncation_of_long_message(self):
+        """
+        What it does: Summarizes a 500 whose message far exceeds the budget.
+        Purpose: The reason code is the actionable signal (retry vs give up);
+            naive message[:100] truncation cut exactly that part, e.g. the
+            MODEL_TEMPORARILY_UNAVAILABLE high-load errors showed as "MODEL_TEM".
+        """
+        print("Setup: Long high-load message with reason...")
+        message = "Encountered unexpectedly high load when processing the request, please try again. " * 3
+
+        print("Action: Summarizing...")
+        line = summarize_upstream_error(500, "/v1/messages", message, "MODEL_TEMPORARILY_UNAVAILABLE")
+
+        print(f"Verification: reason present in '{line}'")
+        assert line.startswith("HTTP 500 - POST /v1/messages - ")
+        assert line.endswith("(reason: MODEL_TEMPORARILY_UNAVAILABLE)")
+
+    def test_reason_suffix_not_duplicated_when_already_appended(self):
+        """
+        What it does: Summarizes a user_message that already ends with the
+            "(reason: X)" suffix produced by enhance_kiro_error.
+        Purpose: The suffix must appear exactly once and survive intact.
+        """
+        print("Setup: Message already carrying the reason suffix...")
+        message = "Something went wrong. (reason: VALIDATION_ERROR)"
+
+        print("Action: Summarizing...")
+        line = summarize_upstream_error(400, "/v1/messages", message, "VALIDATION_ERROR")
+
+        print(f"Verification: single intact suffix in '{line}'")
+        assert line.count("(reason:") == 1
+        assert line.endswith("(reason: VALIDATION_ERROR)")
+        assert "Something went wrong." in line
+
+    def test_reason_suffix_detached_before_truncation(self):
+        """
+        What it does: Summarizes a long message whose trailing "(reason: X)"
+            suffix would be cut in half by the budget.
+        Purpose: Regression test for the observed "MODEL_TEM" half-suffix:
+            the suffix is detached before truncation, never truncated mid-word.
+        """
+        print("Setup: Long message with trailing reason suffix...")
+        message = "x" * 200 + " (reason: MODEL_TEMPORARILY_UNAVAILABLE)"
+
+        print("Action: Summarizing...")
+        line = summarize_upstream_error(500, "/v1/chat/completions", message, "MODEL_TEMPORARILY_UNAVAILABLE")
+
+        print(f"Verification: intact suffix, no half-suffix in '{line}'")
+        assert line.count("(reason:") == 1
+        assert line.endswith("(reason: MODEL_TEMPORARILY_UNAVAILABLE)")
+        assert "MODEL_TEM " not in line
+
+    def test_known_reason_appended_to_enhanced_message(self):
+        """
+        What it does: Summarizes an enhanced message that carries no suffix
+            (enhance_kiro_error maps known reasons to plain text).
+        Purpose: Mapped errors (e.g. CONTENT_LENGTH_EXCEEDS_THRESHOLD) must
+            still expose their reason code in the log.
+        """
+        print("Setup: Enhanced context-limit message...")
+        message = "Model context limit reached. Conversation size exceeds model capacity."
+
+        print("Action: Summarizing...")
+        line = summarize_upstream_error(400, "/v1/messages", message, "CONTENT_LENGTH_EXCEEDS_THRESHOLD")
+
+        print(f"Verification: '{line}'")
+        assert line.endswith("(reason: CONTENT_LENGTH_EXCEEDS_THRESHOLD)")
+        suffix = " (reason: CONTENT_LENGTH_EXCEEDS_THRESHOLD)"
+        kept = message[: ERROR_LOG_MESSAGE_BUDGET - len(suffix)]
+        assert line == f"HTTP 400 - POST /v1/messages - {kept}{suffix}"
+
+    def test_no_reason_behaves_like_plain_truncation(self):
+        """
+        What it does: Summarizes a non-JSON upstream error body (reason=None).
+        Purpose: Preserve the previous message[:100] behavior for raw bodies;
+            no suffix is added.
+        """
+        print("Setup: Raw non-JSON error body...")
+        message = "y" * 200
+
+        print("Action: Summarizing...")
+        line = summarize_upstream_error(502, "/v1/messages", message, None)
+
+        print(f"Verification: 100-char body, no suffix in '{line}'")
+        assert line == f"HTTP 502 - POST /v1/messages - {'y' * 100}"
+        assert "reason" not in line
+
+    def test_short_message_with_reason_not_truncated(self):
+        """
+        What it does: Summarizes a message already within budget.
+        Purpose: Nothing is cut when the message fits; reason is appended.
+        """
+        print("Setup: Short message...")
+        line = summarize_upstream_error(403, "/v1/messages", "Token expired.", "INVALID_TOKEN")
+
+        print(f"Verification: '{line}'")
+        assert line == "HTTP 403 - POST /v1/messages - Token expired. (reason: INVALID_TOKEN)"

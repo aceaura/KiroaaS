@@ -200,6 +200,14 @@ impl ServerManager {
             cmd.env("VPN_PROXY_URL", proxy);
         }
 
+        // Image hosts trusted to skip the SSRF resolved-IP check (fake-ip proxies)
+        if !config.fetch_image_url_allowed_hosts.is_empty() {
+            cmd.env(
+                "FETCH_IMAGE_URL_ALLOWED_HOSTS",
+                &config.fetch_image_url_allowed_hosts,
+            );
+        }
+
         // Configure stdio
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
