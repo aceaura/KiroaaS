@@ -98,6 +98,13 @@ def _parse_allowed_ip_networks() -> List[Union[ipaddress.IPv4Network, ipaddress.
 
 _ALLOWED_IP_NETWORKS = _parse_allowed_ip_networks()
 
+# Fake-ip placeholder range handed out by Clash/mihomo-style proxies (per
+# RFC 2544 benchmarking range). When local DNS answers with one of these, the
+# "resolved IP" carries no information: the proxy, not the address, decides
+# the true destination. Blocking these would reject every hostname behind
+# such a proxy while protecting nothing, so they are always permitted.
+_FAKE_IP_PLACEHOLDER_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+
 
 def _is_blocked_ip(ip_str: str) -> bool:
     """
@@ -108,8 +115,13 @@ def _is_blocked_ip(ip_str: str) -> bool:
     IPv4 and IPv6.
 
     An address inside FETCH_IMAGE_URL_ALLOWED_IP_RANGES is permitted even when
-    it would otherwise be blocked: that is an explicit operator override, used
-    for example to allow a fake-ip proxy's 198.18.0.0/15 placeholders.
+    it would otherwise be blocked: that is an explicit operator override.
+
+    An address inside 198.18.0.0/15 is always permitted: it is a fake-ip
+    proxy placeholder, so blocking it rejects every hostname behind the proxy
+    without protecting anything (the address is unreachable directly either
+    way). A literal URL pointing at such an address fails harmlessly at
+    connect time on direct networks.
 
     Args:
         ip_str: IP address as a string (e.g. "127.0.0.1")
@@ -126,6 +138,10 @@ def _is_blocked_ip(ip_str: str) -> bool:
     for network in _ALLOWED_IP_NETWORKS:
         if ip.version == network.version and ip in network:
             return False
+
+    if ip in _FAKE_IP_PLACEHOLDER_NETWORK:
+        logger.debug(f"Resolved address {ip} is a fake-ip proxy placeholder; permitting")
+        return False
 
     return (
         ip.is_private

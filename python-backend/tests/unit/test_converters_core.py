@@ -1149,6 +1149,57 @@ class TestFetchImageAsBase64:
         print(f"Result: {networks}")
         assert networks == [ipaddress.ip_network("198.18.0.0/15")]
 
+    def test_fake_ip_placeholder_range_permitted_by_default(self):
+        """
+        What it does: Checks _is_blocked_ip against both ends of 198.18.0.0/15
+            with no operator allowlist configured.
+        Purpose: Behind a fake-ip proxy every hostname resolves to a
+            placeholder in this range, so the resolved-IP check is meaningless
+            there; these addresses must be permitted out of the box.
+        """
+        from kiro.converters_core import _is_blocked_ip
+
+        print("Checking both ends of the placeholder range...")
+        assert _is_blocked_ip("198.18.0.1") is False
+        assert _is_blocked_ip("198.19.255.255") is False
+
+    def test_fake_ip_permission_does_not_weaken_other_ranges(self):
+        """
+        What it does: Checks that private/link-local addresses are still
+            blocked after the fake-ip permission.
+        Purpose: The permission is scoped to the placeholder range; real SSRF
+            targets (LAN hosts, cloud metadata) must stay rejected.
+        """
+        from kiro.converters_core import _is_blocked_ip
+
+        print("Checking genuinely dangerous addresses stay blocked...")
+        assert _is_blocked_ip("192.168.1.1") is True
+        assert _is_blocked_ip("10.0.0.5") is True
+        assert _is_blocked_ip("169.254.169.254") is True
+        assert _is_blocked_ip("127.0.0.1") is True
+
+    async def test_fake_ip_resolved_host_is_fetched_without_config(self):
+        """
+        What it does: Fetches an image whose hostname resolves to a fake-ip
+            placeholder, with no allowlist configuration at all.
+        Purpose: End-to-end proof of the zero-config behavior: behind a
+            fake-ip proxy, URL images are fetched instead of silently dropped.
+        """
+        print("Setup: host resolving to 198.18.0.74, empty operator config...")
+        from kiro.converters_core import fetch_image_as_base64
+
+        client_cls, _ = _make_httpx_mock(chunks=(b"img",))
+
+        with patch("kiro.converters_core._ALLOWED_IP_NETWORKS", []):
+            with patch("kiro.converters_core.socket.getaddrinfo", _getaddrinfo_returning("198.18.0.74")):
+                with patch("kiro.converters_core.httpx.AsyncClient", client_cls):
+                    result = await fetch_image_as_base64(
+                        "https://qoder-cn-vl.oss-cn-beijing.aliyuncs.com/i.png"
+                    )
+
+        print(f"Result: {result}")
+        assert result == {"media_type": "image/jpeg", "data": base64.b64encode(b"img").decode("ascii")}
+
 
 # ==================================================================================================
 # Tests for ImageFetchBudget
