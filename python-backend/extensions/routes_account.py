@@ -8,18 +8,26 @@ runs `python main.py`; app_entry.py imports that same app object).
 
 import json
 from datetime import datetime
+from typing import Any, Dict
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
 from extensions.control_plane_host import to_q_amazonaws_host
 from kiro.auth import KiroAuthManager
+from kiro.network_errors import classify_network_error, get_short_error_message
 from kiro.routes_openai import verify_api_key
 from kiro.utils import get_kiro_headers
 
 
 router = APIRouter()
+
+# Extra attempts for transient timeout blips (e.g. proxy upstream flapping).
+# Chat paths get retries from KiroHttpClient; these routes call the shared
+# client directly, so a single timeout would otherwise surface as a bare 502.
+USAGE_TIMEOUT_RETRIES = 1
 
 
 def _resolve_auth_manager(request: Request) -> KiroAuthManager:
@@ -27,6 +35,52 @@ def _resolve_auth_manager(request: Request) -> KiroAuthManager:
     if not account or not account.auth_manager:
         raise HTTPException(status_code=503, detail="No initialized account available")
     return account.auth_manager
+
+
+def _readable_cause(error: Exception) -> str:
+    """Return a one-line, user-readable cause for an upstream failure.
+
+    httpx timeout exceptions stringify to an empty message, so logging raw
+    str(e) yields "Error fetching usage: " with nothing after it; classify
+    those through network_errors instead. Non-httpx exceptions keep their
+    message, falling back to the type name when that is empty too.
+    """
+    if isinstance(error, httpx.HTTPError):
+        return get_short_error_message(classify_network_error(error))
+    return str(error) or type(error).__name__
+
+
+async def _post_usage_limits(
+    request: Request,
+    url: str,
+    body: Dict[str, Any],
+    headers: Dict[str, Any],
+) -> httpx.Response:
+    """POST to GetUsageLimits, retrying once on timeout.
+
+    Args:
+        request: Incoming request carrying the shared http_client in app.state
+        url: Resolved q.amazonaws.com endpoint
+        body: GetUsageLimits request body
+        headers: Kiro auth headers including the x-amz-target
+
+    Returns:
+        The upstream response (any status code; caller maps non-200).
+
+    Raises:
+        httpx.TimeoutException: When every attempt timed out.
+    """
+    attempts = USAGE_TIMEOUT_RETRIES + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return await request.app.state.http_client.post(url, json=body, headers=headers)
+        except httpx.TimeoutException as e:
+            if attempt == attempts:
+                raise
+            logger.warning(
+                f"GetUsageLimits attempt {attempt}/{attempts} failed: {_readable_cause(e)}; retrying"
+            )
+    raise RuntimeError("unreachable: the final attempt always returns or raises")
 
 
 async def _get_usage_limits(request: Request, auth_manager: KiroAuthManager) -> dict:
@@ -51,7 +105,7 @@ async def _get_usage_limits(request: Request, auth_manager: KiroAuthManager) -> 
         "origin": "AI_EDITOR",
         "resourceType": "AGENTIC_REQUEST",
     }
-    response = await request.app.state.http_client.post(url, json=body, headers=headers)
+    response = await _post_usage_limits(request, url, body, headers)
     if response.status_code != 200:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     return response.json()
@@ -75,8 +129,9 @@ async def get_usage(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching usage: {e}", exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Failed to fetch usage: {str(e)}")
+        reason = _readable_cause(e)
+        logger.error(f"Error fetching usage: {reason}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Failed to fetch usage: {reason}")
 
 
 @router.get("/account", dependencies=[Depends(verify_api_key)])
@@ -165,5 +220,6 @@ async def get_account(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching account: {e}", exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Failed to fetch account: {str(e)}")
+        reason = _readable_cause(e)
+        logger.error(f"Error fetching account: {reason}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Failed to fetch account: {reason}")

@@ -20,6 +20,7 @@ import ast
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -421,6 +422,43 @@ class TestErrorPaths:
 
         assert response.status_code == 502
         assert "connection reset" in response.json()["detail"]
+
+    @pytest.mark.parametrize("path", ["/usage", "/account"])
+    def test_timeout_is_retried_once_then_succeeds(self, path, auth_header):
+        """One transient timeout must not surface as a 502."""
+        app = _build_app(
+            auth_manager=_auth_manager(),
+            post_side_effect=[httpx.ReadTimeout(""), _upstream_response(payload=_USAGE_RESPONSE)],
+        )
+        response = TestClient(app).get(path, headers=auth_header)
+
+        assert response.status_code == 200
+        assert app.state.http_client.post.await_count == 2
+
+    @pytest.mark.parametrize("path", ["/usage", "/account"])
+    def test_repeated_timeout_returns_502_with_readable_cause(self, path, auth_header):
+        """httpx timeouts stringify to "", so the 502 must carry the classified cause."""
+        app = _build_app(
+            auth_manager=_auth_manager(),
+            post_side_effect=httpx.ReadTimeout(""),
+        )
+        response = TestClient(app).get(path, headers=auth_header)
+
+        assert response.status_code == 502
+        assert "Read timeout" in response.json()["detail"]
+        assert app.state.http_client.post.await_count == 2
+
+    @pytest.mark.parametrize("path", ["/usage", "/account"])
+    def test_empty_message_exception_502_names_the_type(self, path, auth_header):
+        """An exception with an empty str must not produce a blank 502 detail."""
+        app = _build_app(
+            auth_manager=_auth_manager(),
+            post_side_effect=RuntimeError(),
+        )
+        response = TestClient(app).get(path, headers=auth_header)
+
+        assert response.status_code == 502
+        assert "RuntimeError" in response.json()["detail"]
 
     def test_empty_usage_list_does_not_crash(self, auth_header):
         payload = {"userInfo": {}, "subscriptionInfo": {}, "usageBreakdownList": []}
