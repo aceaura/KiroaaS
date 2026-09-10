@@ -613,10 +613,14 @@ NATIVE_EFFORT_NONE_ON_DISABLED: bool = _NATIVE_EFFORT_NONE_ON_DISABLED_RAW not i
 # Default 600KB provides safety margin below the ~615KB hard limit
 KIRO_MAX_PAYLOAD_BYTES: int = int(os.getenv("KIRO_MAX_PAYLOAD_BYTES", "600000"))
 
-# Auto-trim payload when over limit (default: false - disabled)
-# Enable this if you use many tools (30+) and hit "Improperly formed request" errors
-# When false, returns a clear error instead of trimming
-AUTO_TRIM_PAYLOAD: bool = os.getenv("AUTO_TRIM_PAYLOAD", "false").lower() in ("true", "1", "yes")
+# Auto-trim payload when over limit (default: true - enabled)
+# Guards against the cryptic "Improperly formed request" 400 that oversized
+# payloads trigger, which is most common with 30+ tool definitions.
+# When false, no size check runs at all and the payload is sent as-is.
+#
+# Note: this is a byte guard, not a token guard. It does not prevent the
+# "Model context limit reached" 400, which is driven by the model's token cap.
+AUTO_TRIM_PAYLOAD: bool = os.getenv("AUTO_TRIM_PAYLOAD", "true").lower() in ("true", "1", "yes")
 
 # ==================================================================================================
 # GPT Edit Recovery Settings
@@ -662,8 +666,8 @@ FETCH_IMAGE_URL_TIMEOUT: float = float(os.getenv("FETCH_IMAGE_URL_TIMEOUT", "10"
 # The default is sized against KIRO_MAX_PAYLOAD_BYTES: base64 inflates bytes by
 # ~4/3, so 400000 raw bytes become ~533KB, which is the largest single image
 # that can still fit a 600KB payload alongside any text. Fetching more than the
-# payload can carry only wastes time and memory, since AUTO_TRIM_PAYLOAD is off
-# by default and the oversized payload is rejected outright.
+# payload can carry only wastes time and memory, since the oversized payload
+# then has history trimmed away to make room for the image.
 FETCH_IMAGE_URL_MAX_BYTES: int = int(os.getenv("FETCH_IMAGE_URL_MAX_BYTES", "400000"))
 
 # Maximum number of URL images fetched per request (default: 10).
